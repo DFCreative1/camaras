@@ -17,11 +17,11 @@
   --warn:#e2a23b;
   --font:-apple-system, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
 }
-html,body{margin:0;height:100%;background:var(--black);color:var(--text);font-family:var(--font);-webkit-font-smoothing:antialiased;
+html,body{margin:0;min-height:100%;background:var(--black);color:var(--text);font-family:var(--font);-webkit-font-smoothing:antialiased;
   -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
 body{padding:env(safe-area-inset-top) max(20px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(20px, env(safe-area-inset-left));box-sizing:border-box}
 [hidden]{display:none!important}
-.screen{position:absolute;left:0;top:0;right:0;bottom:0;display:-webkit-flex;display:flex;-webkit-flex-direction:column;flex-direction:column;
+.screen{position:fixed;left:0;top:0;right:0;bottom:0;display:-webkit-flex;display:flex;-webkit-flex-direction:column;flex-direction:column;
   -webkit-justify-content:center;justify-content:center;-webkit-align-items:center;align-items:center;text-align:center;padding:24px;box-sizing:border-box}
 
 /* Configuración */
@@ -53,6 +53,12 @@ button.ghost{background:transparent;color:#8d939a;font-weight:500;font-size:14px
 @-webkit-keyframes pulse{50%{opacity:.25}}
 @keyframes pulse{50%{opacity:.25}}
 .sub{margin-top:8px;font-size:12px;color:var(--dimmer);min-height:16px}
+/* Espacio extra para poder deslizar y que Safari esconda sus barras */
+#spacer{display:none}
+body.standby #spacer{display:block;height:calc(100vh + 240px)}
+.hint{position:absolute;top:calc(16px + env(safe-area-inset-top));left:0;right:0;font-size:12px;color:#3a3f45;
+  -webkit-transition:opacity .4s ease;transition:opacity .4s ease}
+.hint.gone{opacity:0}
 #reset{position:absolute;bottom:calc(14px + env(safe-area-inset-bottom));left:0;right:0;background:none;color:#1e2125;font-size:12px;font-weight:500}
 
 /* Tocar para permitir */
@@ -85,11 +91,14 @@ button.ghost{background:transparent;color:#8d939a;font-weight:500;font-size:14px
 </div>
 
 <div class="screen" id="standby" hidden>
+  <div class="hint" id="hint">Deslizá hacia arriba para ocultar la barra de Safari</div>
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
   <button id="reset" type="button">Cambiar código</button>
 </div>
+
+<div id="spacer"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.4.7/dist/peerjs.min.js"></script>
 <script>
@@ -174,6 +183,8 @@ button.ghost{background:transparent;color:#8d939a;font-weight:500;font-size:14px
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
     try { localStorage.removeItem(KEY); } catch (e) {}
     $('code').value = '';
+    document.body.className = '';
+    window.scrollTo(0, 0);
     show('setup');
   };
 
@@ -282,7 +293,15 @@ button.ghost{background:transparent;color:#8d939a;font-weight:500;font-size:14px
     if (state !== 'sin-red') setState('espera');
   }
 
+  // Al deslizar, Safari achica sus barras; el aviso se esconde y no vuelve a molestar.
+  function checkHint() {
+    var y = window.pageYOffset || document.documentElement.scrollTop || 0;
+    $('hint').className = y > 30 ? 'hint gone' : 'hint';
+  }
+  window.addEventListener('scroll', checkHint);
   function goStandby() {
+    document.body.className = 'standby';
+    checkHint();
     show('standby');
     tick();
     startPeer();
