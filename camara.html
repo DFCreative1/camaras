@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="robots" content="noindex">
+<title>Cámara Ventana · emisor</title>
+<style>
+/* Emisor para el iPhone 5s (Safari de iOS 12). Pantalla negra y texto tenue: casi no se ve de noche. */
+:root{
+  --black:#000;
+  --dim:#4a4f55;
+  --dimmer:#2a2e33;
+  --text:#c9ced4;
+  --ok:#3fae7a;
+  --live:#e5483a;
+  --warn:#e2a23b;
+  --font:-apple-system, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+html,body{margin:0;height:100%;background:var(--black);color:var(--text);font-family:var(--font);-webkit-font-smoothing:antialiased;
+  -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+body{padding:env(safe-area-inset-top) max(20px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(20px, env(safe-area-inset-left));box-sizing:border-box}
+[hidden]{display:none!important}
+.screen{position:absolute;left:0;top:0;right:0;bottom:0;display:-webkit-flex;display:flex;-webkit-flex-direction:column;flex-direction:column;
+  -webkit-justify-content:center;justify-content:center;-webkit-align-items:center;align-items:center;text-align:center;padding:24px;box-sizing:border-box}
+
+/* Configuración */
+h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-.01em;color:#f2f4f6}
+.lead{margin:10px 0 22px;font-size:15px;line-height:1.45;color:#8d939a;max-width:28em}
+input{font:inherit;font-size:20px;text-align:center;width:100%;max-width:260px;padding:12px 14px;border-radius:12px;border:1px solid #33383e;
+  background:#111316;color:#f2f4f6;-webkit-appearance:none;box-sizing:border-box;letter-spacing:.06em}
+input:focus{outline:none;border-color:#6f8fae}
+button{font:inherit;font-size:17px;font-weight:600;margin-top:14px;padding:13px 26px;border-radius:999px;border:0;background:#f2f4f6;color:#000;-webkit-appearance:none}
+button.ghost{background:transparent;color:#8d939a;font-weight:500;font-size:14px;margin-top:6px}
+.err{min-height:20px;margin:12px 0 0;font-size:14px;color:var(--warn)}
+
+/* Apuntar */
+#aim video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;background:#000}
+#aim .bar{position:absolute;left:0;right:0;bottom:0;padding:18px 20px calc(18px + env(safe-area-inset-bottom));
+  background:-webkit-linear-gradient(top, rgba(0,0,0,0), rgba(0,0,0,.85) 40%);background:linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.85) 40%)}
+#aim p{margin:0;font-size:14px;line-height:1.4;color:#d5d9dd}
+
+/* En espera */
+.clock{font-size:64px;font-weight:200;letter-spacing:-.02em;color:var(--dimmer);font-variant-numeric:tabular-nums}
+.state{margin-top:14px;display:-webkit-inline-flex;display:inline-flex;-webkit-align-items:center;align-items:center;font-size:13px;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.state i{width:7px;height:7px;border-radius:50%;margin-right:9px;background:var(--dim)}
+.state[data-s="espera"] i{background:var(--ok)}
+.state[data-s="en-vivo"] i{background:var(--live);-webkit-animation:pulse 1.6s ease-in-out infinite;animation:pulse 1.6s ease-in-out infinite}
+.state[data-s="en-vivo"]{color:#7b3a34}
+.state[data-s="encendiendo"] i,.state[data-s="permiso"] i{background:var(--warn)}
+.state[data-s="sin-red"] i{background:transparent;box-shadow:0 0 0 1.5px var(--dim) inset}
+@-webkit-keyframes pulse{50%{opacity:.25}}
+@keyframes pulse{50%{opacity:.25}}
+.sub{margin-top:8px;font-size:12px;color:var(--dimmer);min-height:16px}
+#reset{position:absolute;bottom:calc(14px + env(safe-area-inset-bottom));left:0;right:0;background:none;color:#1e2125;font-size:12px;font-weight:500}
+
+/* Tocar para permitir */
+#tap h1{font-size:22px}
+</style>
+</head>
+<body>
+
+<div class="screen" id="setup" hidden>
+  <h1>Cámara Ventana</h1>
+  <p class="lead">Este iPhone va a ser la cámara. Elegí un código de al menos 6 letras o números. Es el mismo que vas a poner en el iPhone con el que mirás.</p>
+  <input id="code" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Código">
+  <button id="go" type="button">Activar cámara</button>
+  <p class="err" id="err"></p>
+</div>
+
+<div class="screen" id="tap" hidden>
+  <h1>Tocá para activar</h1>
+  <p class="lead">Safari va a pedir permiso para usar la cámara. Tocá <b>Permitir</b> y queda en espera.</p>
+  <button id="tapGo" type="button">Activar</button>
+  <p class="err" id="tapErr"></p>
+</div>
+
+<div class="screen" id="aim" hidden>
+  <video id="preview" playsinline autoplay muted></video>
+  <div class="bar">
+    <p>Apuntá a la ventana. Con la lente apoyada en el vidrio no hay reflejos.</p>
+    <button id="ready" type="button">Listo, dejar en espera</button>
+  </div>
+</div>
+
+<div class="screen" id="standby" hidden>
+  <div class="clock" id="clock">--:--</div>
+  <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
+  <div class="sub" id="sub"></div>
+  <button id="reset" type="button">Cambiar código</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.4.7/dist/peerjs.min.js"></script>
+<script>
+(function () {
+  'use strict';
+  // Sin ?. ni ?? ni campos de clase: tiene que correr en Safari 12.
+  var KEY = 'camaraVentana.codigo';
+  var $ = function (id) { return document.getElementById(id); };
+  var code = '';
+  try { code = localStorage.getItem(KEY) || ''; } catch (e) {}
+
+  // ---------- Utilidades compartidas con la página de ver ----------
+  function hash(str, seed) {
+    var h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed, i, ch;
+    for (i = 0; i < str.length; i++) {
+      ch = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+  }
+  function camId(c) { return 'cventana-' + hash(c, 1) + hash(c, 7); }
+  function peerOptions() {
+    // ?srv=host:puerto sirve para usar un servidor propio en vez del público de PeerJS.
+    var m = /[?&]srv=([^&]+)/.exec(location.search);
+    var o = { debug: 1 };
+    if (m) {
+      var p = decodeURIComponent(m[1]).split(':');
+      o.host = p[0]; o.port = parseInt(p[1] || '443', 10); o.path = '/'; o.secure = o.port === 443;
+    }
+    return o;
+  }
+  function show(id) {
+    ['setup', 'tap', 'aim', 'standby'].forEach(function (s) { $(s).hidden = s !== id; });
+  }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+
+  // ---------- Cámara ----------
+  var stream = null;
+  function getCam() {
+    return navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15, max: 20 } }
+    });
+  }
+  function stopStream(s) {
+    if (!s) return;
+    s.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
+  }
+  function camError(e) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return 'Este Safari no permite usar la cámara. Abrí la página en Safari, no desde un ícono de inicio.';
+    if (e && e.name === 'NotAllowedError') return 'No hay permiso para la cámara. Recargá la página y tocá Permitir.';
+    return 'No pude abrir la cámara (' + (e && e.name ? e.name : 'error') + ').';
+  }
+
+  // ---------- Pantallas de arranque ----------
+  $('go').onclick = function () {
+    var c = ($('code').value || '').replace(/\s+/g, '');
+    if (c.length < 6) { $('err').textContent = 'El código tiene que tener al menos 6 caracteres.'; return; }
+    code = c;
+    try { localStorage.setItem(KEY, code); } catch (e) {}
+    $('err').textContent = '';
+    getCam().then(function (s) {
+      stream = s;
+      var v = $('preview'); v.srcObject = s; v.play();
+      show('aim');
+    }).catch(function (e) { $('err').textContent = camError(e); });
+  };
+  $('ready').onclick = function () {
+    $('preview').srcObject = null;
+    stopStream(stream); stream = null;
+    goStandby();
+  };
+  $('tapGo').onclick = function () {
+    getCam().then(function (s) { stopStream(s); goStandby(); })
+      .catch(function (e) { $('tapErr').textContent = camError(e); });
+  };
+  $('reset').onclick = function () {
+    turnOff();
+    if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
+    try { localStorage.removeItem(KEY); } catch (e) {}
+    $('code').value = '';
+    show('setup');
+  };
+
+  // ---------- Estado ----------
+  var state = 'sin-red', liveSince = 0, netOk = false;
+  var LABELS = {
+    'sin-red': 'Conectando', 'espera': 'En espera', 'encendiendo': 'Encendiendo',
+    'en-vivo': 'Transmitiendo', 'permiso': 'Tocá para permitir', 'error': 'Error'
+  };
+  function setState(s, msg) {
+    state = s;
+    var shown = (!netOk && (s === 'espera')) ? 'sin-red' : s;
+    $('state').setAttribute('data-s', shown);
+    $('stateText').textContent = LABELS[shown] || shown;
+    $('sub').textContent = msg || '';
+    if (s === 'en-vivo' && !liveSince) liveSince = Date.now();
+    if (s !== 'en-vivo') liveSince = 0;
+    send({ t: 'estado', s: s, ms: liveSince ? Date.now() - liveSince : 0, msg: msg || '' });
+  }
+  function tick() {
+    var d = new Date();
+    $('clock').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  // ---------- Conexión ----------
+  var peer = null, conn = null, call = null, lastPing = 0, restartTimer = null;
+  function send(m) { if (conn && conn.open) { try { conn.send(m); } catch (e) {} } }
+
+  function startPeer() {
+    clearTimeout(restartTimer); restartTimer = null;
+    if (peer) { try { peer.destroy(); } catch (e) {} }
+    netOk = false; setState(state === 'sin-red' ? 'espera' : state);
+    var p = new Peer(camId(code), peerOptions());
+    peer = p;
+    p.on('open', function () { if (p !== peer) return; netOk = true; setState(state); });
+    p.on('connection', onConn);
+    p.on('disconnected', function () {
+      if (p !== peer) return;
+      netOk = false; setState(state);
+      setTimeout(function () { if (p === peer && !p.destroyed && p.disconnected) { try { p.reconnect(); } catch (e) { restartSoon(); } } }, 3000);
+    });
+    p.on('error', function (err) {
+      if (p !== peer) return;
+      var t = err && err.type;
+      if (t === 'peer-unavailable') return; // el que miraba se fue
+      netOk = false; setState(state, t === 'unavailable-id' ? 'Reconectando…' : '');
+      restartSoon();
+    });
+  }
+  function restartSoon() {
+    if (restartTimer) return;
+    restartTimer = setTimeout(startPeer, 8000);
+  }
+
+  function onConn(c) {
+    var authed = false;
+    c.on('data', function (m) {
+      if (!m || typeof m !== 'object') return;
+      if (m.t === 'hola') {
+        if (m.code !== code) { try { c.send({ t: 'error', msg: 'Código incorrecto' }); } catch (e) {} setTimeout(function () { c.close(); }, 600); return; }
+        authed = true;
+        if (conn && conn !== c) { var old = conn; conn = null; endCall(); try { old.close(); } catch (e) {} }
+        conn = c; lastPing = Date.now();
+        send({ t: 'estado', s: state === 'sin-red' ? 'espera' : state, ms: liveSince ? Date.now() - liveSince : 0, msg: '' });
+        return;
+      }
+      if (!authed) return;
+      lastPing = Date.now();
+      if (m.t === 'on') turnOn();
+      else if (m.t === 'off') turnOff();
+    });
+    var gone = function () { if (conn === c) { conn = null; turnOff(); } };
+    c.on('close', gone);
+    c.on('error', gone);
+  }
+
+  function turnOn() {
+    if (state === 'en-vivo' && stream) { if (!call) placeCall(); return; }
+    if (state === 'encendiendo' || state === 'permiso') return;
+    setState('encendiendo');
+    var waiting = setTimeout(function () { if (state === 'encendiendo') setState('permiso', 'Safari está pidiendo permiso'); }, 10000);
+    getCam().then(function (s) {
+      clearTimeout(waiting);
+      if (!conn || (state !== 'encendiendo' && state !== 'permiso')) { stopStream(s); return; }
+      stream = s;
+      placeCall();
+    }).catch(function (e) {
+      clearTimeout(waiting);
+      setState(e && e.name === 'NotAllowedError' ? 'permiso' : 'error', camError(e));
+    });
+  }
+  function placeCall() {
+    if (!conn || !stream || !peer) return;
+    var c = peer.call(conn.peer, stream);
+    call = c;
+    c.on('close', function () { if (call === c) { call = null; turnOff(); } });
+    c.on('error', function () { if (call === c) { call = null; turnOff(); } });
+    setState('en-vivo');
+  }
+  function endCall() {
+    if (call) { var c = call; call = null; try { c.close(); } catch (e) {} }
+    stopStream(stream); stream = null;
+  }
+  function turnOff() {
+    endCall();
+    if (state !== 'sin-red') setState('espera');
+  }
+
+  function goStandby() {
+    show('standby');
+    tick();
+    startPeer();
+  }
+
+  // Si quien mira deja de responder 30 s, la cámara se apaga sola.
+  setInterval(function () {
+    if ((state === 'en-vivo' || state === 'encendiendo' || state === 'permiso') && Date.now() - lastPing > 30000) turnOff();
+  }, 5000);
+  // Vigilante: si se cortó el servidor, reintenta.
+  setInterval(function () {
+    if (!$('standby').hidden && code) {
+      if (!peer || peer.destroyed) startPeer();
+      else if (peer.disconnected) { try { peer.reconnect(); } catch (e) { restartSoon(); } }
+    }
+  }, 20000);
+  setInterval(tick, 10000);
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && !$('standby').hidden && (!peer || peer.disconnected || peer.destroyed)) startPeer();
+  });
+
+  // ---------- Arranque ----------
+  if (typeof Peer === 'undefined') {
+    show('setup'); $('err').textContent = 'No cargó la conexión. Revisá internet y recargá.'; return;
+  }
+  if (code) show('tap'); else show('setup');
+})();
+</script>
+</body>
+</html>
