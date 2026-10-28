@@ -200,7 +200,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 
   function start() {
     clearTimeout(retry); retry = null; clearTimeout(openTimer);
-    conn = null; call = null; hasVideo = false;
+    closeAttempts(); conn = null; call = null; hasVideo = false;
     if (peer) { var old = peer; peer = null; try { old.destroy(); } catch (e) {} }
     var p = new Peer(peerOptions());
     peer = p; since = Date.now();
@@ -220,38 +220,67 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     });
     p.on('error', function (err) {
       if (p !== peer) return;
-      lastErr = 'error ' + (err && err.type ? err.type : '?');
-      if (err && err.type === 'peer-unavailable') { cam = 'apagada'; camMsg = ''; render(); later(connectCam, 8000); return; }
+      if (!(err && err.type === 'peer-unavailable')) lastErr = 'error ' + (err && err.type ? err.type : '?');
+      if (err && err.type === 'peer-unavailable') {
+        var msg = String(err.message || '');
+        attempts.forEach(function (a) { if (msg.indexOf(a.id) >= 0) a.unavailable = true; });
+        settleFailed(); return;
+      }
       cam = 'sin-red'; render(); later(start, 6000);
     });
     p.on('disconnected', function () { if (p === peer) later(function () { try { p.reconnect(); } catch (e) { start(); } }, 3000); });
   }
   function later(fn, ms) { clearTimeout(retry); retry = setTimeout(function () { retry = null; fn(); }, ms); }
 
+  // La cámara puede estar en cualquiera de 3 lugares del servidor: pruebo los 3 y me quedo con el que contesta.
+  var SLOTS = 3, attempts = [];
+  function slotId(i) { return camId(code) + '-' + i; }
+  function closeAttempts(keep) {
+    var list = attempts; attempts = [];
+    list.forEach(function (a) { if (a.c !== keep) { a.gone = true; try { a.c.close(); } catch (e) {} } });
+  }
+  function settleFailed() {
+    if (conn || !attempts.length) return;
+    if (!attempts.every(function (a) { return a.gone || a.unavailable; })) return;
+    clearTimeout(openTimer);
+    var found = attempts.some(function (a) { return !a.unavailable; });
+    attempts = [];
+    cam = found ? 'sin-ruta' : 'apagada'; camMsg = ''; lastErr = found ? 'la cámara no contestó' : '';
+    render(); later(connectCam, 5000);
+  }
   function connectCam() {
     if (!peer || peer.destroyed || peer.disconnected) { later(start, 2000); return; }
     if (!peer.open) return; // al abrirse el servidor, 'open' vuelve a llamar acá
-    if (conn) { try { conn.close(); } catch (e) {} conn = null; }
-    var c = peer.connect(camId(code), { serialization: 'json', reliable: true });
-    conn = c; since = Date.now();
+    closeAttempts();
+    if (conn) { var old = conn; conn = null; try { old.close(); } catch (e) {} }
+    since = Date.now();
     if (cam === 'sin-red' || cam === 'apagada' || cam === 'sin-ruta') { cam = 'buscando'; camMsg = ''; render(); }
+    for (var i = 0; i < SLOTS; i++) (function (i) {
+      var c = peer.connect(slotId(i), { serialization: 'json', reliable: true });
+      var a = { c: c, id: slotId(i), gone: false, unavailable: false };
+      attempts.push(a);
+      c.on('open', function () { try { c.send({ t: 'hola', code: code }); } catch (e) {} });
+      c.on('data', function (m) { onData(c, m); });
+      var end = function () {
+        a.gone = true;
+        if (conn === c) { conn = null; hasVideo = false; cam = 'apagada'; camMsg = ''; render(); later(connectCam, 3000); }
+        else settleFailed();
+      };
+      c.on('close', end); c.on('error', end);
+    })(i);
     clearTimeout(openTimer);
     openTimer = setTimeout(function () {
-      if (conn === c && !c.open) { conn = null; try { c.close(); } catch (e) {} cam = 'sin-ruta'; camMsg = ''; lastErr = 'conexión directa no abrió'; render(); later(connectCam, 6000); }
+      if (conn) return;
+      attempts.forEach(function (a) { a.gone = true; });
+      settleFailed(); closeAttempts();
     }, 15000);
-    c.on('open', function () { clearTimeout(openTimer); c.send({ t: 'hola', code: code }); });
-    c.on('data', function (m) {
-      if (!m || typeof m !== 'object') return;
-      if (m.t === 'estado') { cam = m.s; camMsg = m.msg || ''; liveSince = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0; render(); }
-      if (m.t === 'error') { cam = 'error'; camMsg = m.msg || ''; render(); }
-    });
-    var gone = function () {
-      if (conn !== c) return;
-      var wasOpen = c.open || cam === 'espera' || cam === 'en-vivo';
-      conn = null; hasVideo = false; cam = wasOpen ? 'apagada' : 'sin-ruta'; camMsg = ''; render();
-      later(connectCam, 4000);
-    };
-    c.on('close', gone); c.on('error', gone);
+  }
+  function onData(c, m) {
+    if (!m || typeof m !== 'object') return;
+    if (!conn && (m.t === 'estado' || m.t === 'error')) { conn = c; clearTimeout(openTimer); closeAttempts(c); lastErr = ''; }
+    if (c !== conn) return;
+    if (m.t === 'estado') { cam = m.s; camMsg = m.msg || ''; liveSince = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0; render(); }
+    if (m.t === 'error') { cam = 'error'; camMsg = m.msg || ''; render(); }
   }
 
   // ---------- Controles ----------

@@ -210,14 +210,15 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   }
 
   // ---------- Conexión ----------
-  var peer = null, conn = null, call = null, lastPing = 0, restartTimer = null;
+  var peer = null, conn = null, call = null, lastPing = 0, restartTimer = null, slot = 0, SLOTS = 3;
   function send(m) { if (conn && conn.open) { try { conn.send(m); } catch (e) {} } }
 
   function startPeer() {
     clearTimeout(restartTimer); restartTimer = null;
     if (peer) { try { peer.destroy(); } catch (e) {} }
     netOk = false; setState(state === 'sin-red' ? 'espera' : state);
-    var p = new Peer(camId(code), peerOptions());
+    // Hay 3 "lugares" en el servidor. Si una pestaña vieja dormida quedó ocupando uno, uso el siguiente.
+    var p = new Peer(camId(code) + '-' + slot, peerOptions());
     peer = p;
     p.on('open', function () { if (p !== peer) return; netOk = true; setState(state); });
     p.on('connection', onConn);
@@ -230,7 +231,13 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
       if (p !== peer) return;
       var t = err && err.type;
       if (t === 'peer-unavailable') return; // el que miraba se fue
-      netOk = false; setState(state, t === 'unavailable-id' ? 'Reconectando…' : '');
+      if (t === 'unavailable-id') {
+        slot = (slot + 1) % SLOTS;
+        clearTimeout(restartTimer);
+        restartTimer = setTimeout(startPeer, slot === 0 ? 8000 : 800);
+        return;
+      }
+      netOk = false; setState(state, '');
       restartSoon();
     });
   }
