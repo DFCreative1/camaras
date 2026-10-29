@@ -45,6 +45,8 @@ header{display:flex;align-items:center;justify-content:space-between;gap:12px;pa
 .pill[data-s="en-vivo"]{color:var(--text);border-color:rgba(255,81,67,.45)}
 .pill[data-s="en-vivo"] i{background:var(--live);animation:pulse 1.6s ease-in-out infinite}
 .pill[data-s="sin-ruta"] i{background:var(--warn)}
+.pill[data-s="sin-senal"] i{background:transparent;box-shadow:0 0 0 1.5px var(--warn) inset}
+.pill[data-s="error"] i{background:var(--warn)}
 .pill[data-s="buscando"] i{background:var(--glass)}
 .pill[data-s="apagada"] i,.pill[data-s="sin-red"] i{background:transparent;box-shadow:0 0 0 1.5px var(--muted) inset}
 @keyframes pulse{50%{opacity:.3}}
@@ -138,11 +140,11 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 <script>
 (function () {
   'use strict';
+  // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
+  var VER = 'v10';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
-  var code = '';
-  try { code = localStorage.getItem(KEY) || ''; } catch (e) {}
-
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
   function hash(str, seed) {
     var h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed, i, ch;
     for (i = 0; i < str.length; i++) {
@@ -154,215 +156,248 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
     return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
   }
-  function camId(c) { return 'cventana-' + hash(c, 1) + hash(c, 7); }
-  function peerOptions() {
-    var m = /[?&]srv=([^&]+)/.exec(location.search);
-    var o = { debug: 1 };
-    // Servidores para encontrar el camino entre los dos teléfonos: varios STUN y el relé de PeerJS.
-    o.config = { iceServers: [
-      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-      { urls: 'stun:stun.cloudflare.com:3478' },
-      { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' }
-    ] };
-    if (m) {
-      var p = decodeURIComponent(m[1]).split(':');
-      o.host = p[0]; o.port = parseInt(p[1] || '443', 10); o.path = '/'; o.secure = o.port === 443;
+  function param(name) {
+    var m = new RegExp('[?&]' + name + '=([^&]+)').exec(location.search);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  // SHA-1 / HMAC para las credenciales del relé gratuito (Open Relay, sin cuenta).
+  function sha1(bytes) {
+    var H = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
+    var b = bytes.slice(), ml = bytes.length * 8, i, t, w = new Array(80);
+    b.push(0x80);
+    while (b.length % 64 !== 56) b.push(0);
+    b.push(0, 0, 0, 0, (ml >>> 24) & 255, (ml >>> 16) & 255, (ml >>> 8) & 255, ml & 255);
+    for (i = 0; i < b.length; i += 64) {
+      for (t = 0; t < 16; t++) w[t] = (b[i + 4 * t] << 24) | (b[i + 4 * t + 1] << 16) | (b[i + 4 * t + 2] << 8) | b[i + 4 * t + 3];
+      for (t = 16; t < 80; t++) { var x = w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16]; w[t] = (x << 1) | (x >>> 31); }
+      var a = H[0], bb = H[1], c = H[2], d = H[3], e = H[4];
+      for (t = 0; t < 80; t++) {
+        var f, k;
+        if (t < 20) { f = (bb & c) | (~bb & d); k = 0x5A827999; }
+        else if (t < 40) { f = bb ^ c ^ d; k = 0x6ED9EBA1; }
+        else if (t < 60) { f = (bb & c) | (bb & d) | (c & d); k = 0x8F1BBCDC; }
+        else { f = bb ^ c ^ d; k = 0xCA62C1D6; }
+        var tmp = (((a << 5) | (a >>> 27)) + f + e + k + w[t]) | 0;
+        e = d; d = c; c = (bb << 30) | (bb >>> 2); bb = a; a = tmp;
+      }
+      H[0] = (H[0] + a) | 0; H[1] = (H[1] + bb) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0; H[4] = (H[4] + e) | 0;
     }
+    var out = [];
+    for (i = 0; i < 5; i++) out.push((H[i] >>> 24) & 255, (H[i] >>> 16) & 255, (H[i] >>> 8) & 255, H[i] & 255);
+    return out;
+  }
+  function bytesOf(s) { var o = []; for (var i = 0; i < s.length; i++) o.push(s.charCodeAt(i) & 255); return o; }
+  function hmacSha1B64(key, msg) {
+    var k = bytesOf(key), ip = [], op = [], i;
+    if (k.length > 64) k = sha1(k);
+    while (k.length < 64) k.push(0);
+    for (i = 0; i < 64; i++) { ip.push(k[i] ^ 0x36); op.push(k[i] ^ 0x5c); }
+    var r = sha1(op.concat(sha1(ip.concat(bytesOf(msg))))), s = '';
+    for (i = 0; i < r.length; i++) s += String.fromCharCode(r[i]);
+    return btoa(s);
+  }
+  // Caminos para el video: directo (STUN) y dos relés de respaldo, uno por el puerto 443 que pasa casi cualquier red.
+  function iceServers() {
+    var user = (Math.floor(Date.now() / 1000) + 2 * 86400) + ':cventana';
+    return [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+      { urls: ['turn:staticauth.openrelay.metered.ca:80', 'turn:staticauth.openrelay.metered.ca:443?transport=tcp'],
+        username: user, credential: hmacSha1B64('openrelayprojectsecret', user) },
+      { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' }
+    ];
+  }
+  function peerOptions() {
+    var o = { debug: 1, config: { iceServers: iceServers() } };
+    var srv = param('srv');
+    if (srv) { var p = srv.split(':'); o.host = p[0]; o.port = parseInt(p[1] || '443', 10); o.path = '/'; o.secure = o.port === 443; }
     return o;
   }
-  function pad(n) { return (n < 10 ? '0' : '') + n; }
-  function mmss(ms) { var s = Math.max(0, Math.floor(ms / 1000)); return pad(Math.floor(s / 60)) + ':' + pad(s % 60); }
 
-  // ---------- Estado en pantalla ----------
-  var cam = 'sin-red', camMsg = '', liveSince = 0;
-  var PILL = { 'sin-red': 'Conectando', 'buscando': 'Buscando cámara', 'sin-ruta': 'Sin ruta', 'apagada': 'Sin cámara', 'espera': 'En espera', 'encendiendo': 'Encendiendo',
-    'en-vivo': 'En vivo', 'permiso': 'Falta permiso', 'error': 'Error' };
+  // ---------- Avisos instantáneos (ntfy.sh, gratis y sin cuenta) ----------
+  // El 5s avisa "estoy en espera" y recibe "encendé" por acá, sin depender de que los teléfonos se encuentren.
+  var NTFY = param('ntfy') || 'https://ntfy.sh';
+  function topic(code, kind) { return 'cventana-' + hash(code, 1) + hash(code, 7) + hash(code, 11) + '-' + kind; }
+  function firma(code) { return hash(code + '|ventana', 21); }
+  function publish(code, kind, obj) {
+    try {
+      var x = new XMLHttpRequest();
+      x.open('POST', NTFY + '/' + topic(code, kind), true);
+      x.send(JSON.stringify(obj));
+    } catch (e) {}
+  }
+  // Suscripción con reconexión: si no llega nada (ni el "keepalive" de ntfy) en 100 s, se reabre.
+  function subscribe(code, kind, since, onMsg, onAlive) {
+    var es = null, last = 0, closed = false, first = true;
+    function open() {
+      if (closed) return;
+      try { if (es) es.close(); } catch (e) {}
+      var q = (first && since) ? '?since=' + since : '';
+      first = false;
+      es = new EventSource(NTFY + '/' + topic(code, kind) + '/sse' + q);
+      var alive = function () { last = Date.now(); onAlive(true); };
+      es.onopen = alive;
+      es.addEventListener('keepalive', alive);
+      es.addEventListener('open', alive);
+      es.onmessage = function (ev) {
+        alive();
+        try {
+          var d = JSON.parse(ev.data);
+          if (d.event && d.event !== 'message') return;
+          onMsg(JSON.parse(d.message), (d.time || 0) * 1000);
+        } catch (e) {}
+      };
+      es.onerror = function () { onAlive(false); };
+      last = Date.now();
+    }
+    var timer = setInterval(function () { if (Date.now() - last > 100000) open(); }, 10000);
+    open();
+    return { reopen: open, close: function () { closed = true; clearInterval(timer); try { es.close(); } catch (e) {} } };
+  }
+
+  var code = '';
+  try { code = localStorage.getItem(KEY) || ''; } catch (e) {}
+  function mmss(ms) { var s = Math.max(0, Math.floor(ms / 1000)); return pad(Math.floor(s / 60)) + ':' + pad(s % 60); }
+  function hhmm(t) { var d = new Date(t); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+
+  // ---------- Estado ----------
+  // cam: lo que informa el 5s en su último aviso. Si el aviso es viejo, se muestra "sin señal".
+  var cam = 'buscando', camMsg = '', camLista = true, lastSeen = 0, liveSince = 0, msgOk = false;
+  var want = false, wantSince = 0, hasVideo = false, route = '', lastErr = '';
+  var PILL = { 'buscando': 'Buscando', 'sin-senal': 'Sin señal', 'espera': 'En espera', 'encendiendo': 'Encendiendo',
+    'en-vivo': 'En vivo', 'permiso': 'Falta permiso', 'error': 'Atención' };
   var IDLE = {
-    'sin-red': ['Conectando al servidor', 'Si tarda más de 20 segundos, el servidor gratuito de conexión puede estar caído. Reintento solo.'],
-    'buscando': ['Conectando con el 5s', 'El servidor respondió. Abriendo la conexión directa con la cámara.'],
-    'sin-ruta': ['La cámara está, pero no hay camino', 'El 5s está conectado, pero los dos teléfonos no pueden verse. Suele pasar con datos móviles: hace falta un relé. Reintento solo.'],
-    'apagada': ['La cámara no está conectada', 'Fijate que el 5s tenga Safari abierto en la página de la cámara, con la pantalla encendida y wifi.'],
-    'espera': ['La cámara está en espera', 'Tocá Encender para ver en vivo. Mientras tanto no filma ni gasta casi batería.'],
-    'encendiendo': ['Encendiendo la cámara', 'Tarda unos segundos.'],
-    'permiso': ['El 5s está pidiendo permiso', 'Safari quiere confirmar el uso de la cámara. Hay que tocar Permitir en el 5s. Pasa a veces después de recargar la página.'],
-    'error': ['La cámara tuvo un problema', '']
+    'buscando': ['Escuchando al 5s', 'Cada 30 segundos el 5s avisa que está despierto. En segundos aparece acá.'],
+    'sin-senal': ['El 5s no avisa desde las ', 'Puede haberse quedado sin batería, sin wifi o con Safari cerrado. Cuando vuelva, aparece solo.'],
+    'espera': ['La cámara está en espera', 'Tocá Encender para verla en vivo.'],
+    'encendiendo': ['Encendiendo la cámara', 'El 5s ya recibió la orden. El video llega en unos segundos.'],
+    'permiso': ['El 5s está pidiendo permiso', 'Safari quiere confirmar el uso de la cámara: hay que tocar Permitir en el 5s.'],
+    'error': ['La cámara avisó un problema', ''],
+    'en-vivo': ['Conectando el video', 'La cámara ya está transmitiendo. Un instante.']
   };
+  function effective() {
+    if (!lastSeen) return 'buscando';
+    if (Date.now() - lastSeen > 75000) return 'sin-senal';
+    if (want && cam === 'espera') return 'encendiendo';
+    return cam;
+  }
   function render() {
-    $('pill').setAttribute('data-s', cam);
-    $('pillText').textContent = (PILL[cam] || cam) + (cam === 'buscando' ? ' · ' + Math.round((Date.now() - since) / 1000) + ' s' : '');
-    $('monitor').setAttribute('data-s', cam);
-    var live = cam === 'en-vivo' && hasVideo;
+    var st = effective();
+    var live = hasVideo && want;
+    $('pill').setAttribute('data-s', live ? 'en-vivo' : st);
+    $('pillText').textContent = live ? PILL['en-vivo'] : (PILL[st] || st);
+    $('monitor').setAttribute('data-s', live ? 'en-vivo' : st);
     $('video').hidden = !live; $('hud').hidden = !live; $('full').hidden = !live;
     $('idle').hidden = live;
     document.body.className = live ? 'live' : '';
-    var t = IDLE[cam] || IDLE['sin-red'];
+    var t = IDLE[st] || IDLE['espera'];
     $('idleText').innerHTML = '';
-    var s = document.createElement('strong'); s.textContent = t[0]; $('idleText').appendChild(s);
-    $('idleText').appendChild(document.createTextNode(camMsg || t[1]));
+    var s = document.createElement('strong');
+    s.textContent = st === 'sin-senal' ? t[0] + hhmm(lastSeen) : t[0];
+    $('idleText').appendChild(s);
+    $('idleText').appendChild(document.createTextNode(camMsg && (st === 'espera' || st === 'error') ? camMsg : t[1]));
     var btn = $('toggle');
-    var on = cam === 'en-vivo' || cam === 'encendiendo' || cam === 'permiso';
-    btn.textContent = on ? 'Apagar cámara' : 'Encender cámara';
-    btn.className = on ? 'main off' : 'main';
-    btn.disabled = !(conn && conn.open) || cam === 'sin-red' || cam === 'buscando' || cam === 'sin-ruta' || cam === 'apagada';
-    $('diag').textContent = 'v9 · servidor ' + (peer && peer.open ? 'conectado' : 'no conectado') +
-      ' · cámara ' + (conn && conn.open ? 'conectada' : (cam === 'apagada' ? 'no registrada' : cam === 'sin-ruta' ? 'sin ruta directa' : 'buscando')) +
-      (conn && conn.open && route ? ' · ' + route : '') +
-      (conn && conn.open && connectMs ? ' · conectó en ' + (connectMs / 1000).toFixed(1) + ' s' : '') +
-      (lastErr ? ' · ' + lastErr : '') + ' · ' + (navigator.onLine === false ? 'sin internet' : 'online');
+    btn.textContent = want ? 'Apagar cámara' : 'Encender cámara';
+    btn.className = want ? 'main off' : 'main';
+    btn.disabled = !want && (st === 'buscando' || st === 'sin-senal' || !peer || !peer.open);
+    var ago = lastSeen ? Math.round((Date.now() - lastSeen) / 1000) : -1;
+    $('diag').textContent = VER + ' · avisos ' + (msgOk ? 'ok' : 'conectando') +
+      ' · video ' + (peer && peer.open ? 'listo' : 'preparando') +
+      (ago >= 0 ? ' · último aviso hace ' + ago + ' s' : '') +
+      (route ? ' · ' + route : '') + (lastErr ? ' · ' + lastErr : '');
   }
 
-  // ---------- Conexión ----------
-  var peer = null, conn = null, call = null, hasVideo = false, retry = null, openTimer = null, lastErr = '', since = Date.now();
-  function send(m) { if (conn && conn.open) { try { conn.send(m); } catch (e) {} } }
+  // ---------- Avisos del 5s ----------
+  var sub = null;
+  function listen() {
+    if (sub) sub.close();
+    // since=3m: al abrir, trae el último aviso guardado y muestra el estado al instante.
+    sub = subscribe(code, 'vis', '3m', function (m, t) {
+      if (!m || m.t !== 'estado') return;
+      var when = t || Date.now();
+      if (when < lastSeen) return;
+      lastSeen = Math.min(when, Date.now());
+      cam = m.s; camMsg = m.msg || ''; camLista = m.lista !== false;
+      liveSince = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0;
+      if (cam === 'espera' && want && camMsg) { lastErr = camMsg; }
+      render();
+    }, function (ok) { msgOk = ok; render(); });
+    publish(code, 'cam', { t: 'hola', k: firma(code) });
+  }
 
-  function start() {
-    clearTimeout(retry); retry = null; clearTimeout(openTimer);
-    closeAttempts(); conn = null; call = null; hasVideo = false;
+  // ---------- Video ----------
+  var peer = null, call = null, restartTimer = null, noVideoTimer = null;
+  function startPeer() {
+    clearTimeout(restartTimer); restartTimer = null;
     if (peer) { var old = peer; peer = null; try { old.destroy(); } catch (e) {} }
     var p = new Peer(peerOptions());
-    peer = p; since = Date.now();
-    if (cam !== 'apagada' && cam !== 'sin-ruta') { cam = 'sin-red'; render(); }
-    p.on('open', function () { if (p === peer) { lastErr = ''; connectCam(); } });
+    peer = p;
+    p.on('open', function () { if (p !== peer) return; render(); if (want) sendOn(); });
     p.on('call', function (c) {
-      if (call) { try { call.close(); } catch (e) {} }
+      if (call && call !== c) { try { call.close(); } catch (e) {} }
       call = c;
       c.answer();
       c.on('stream', function (s) {
         var v = $('video'); v.srcObject = s;
         var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
-        hasVideo = true; render();
+        hasVideo = true; lastErr = ''; clearTimeout(noVideoTimer); render();
         v.onloadedmetadata = v.onresize = function () {
           if (v.videoWidth && v.videoHeight) $('monitor').style.aspectRatio = v.videoWidth + ' / ' + v.videoHeight;
         };
+        setTimeout(function () { measureRoute(c); }, 1500);
       });
-      var end = function () { if (call === c) { call = null; hasVideo = false; $('video').srcObject = null; render(); } };
+      var end = function () { if (call === c) { call = null; hasVideo = false; route = ''; $('video').srcObject = null; render(); } };
       c.on('close', end); c.on('error', end);
     });
-    p.on('error', function (err) {
-      if (p !== peer) return;
-      if (!(err && err.type === 'peer-unavailable')) lastErr = 'error ' + (err && err.type ? err.type : '?');
-      if (err && err.type === 'peer-unavailable') {
-        var msg = String(err.message || '');
-        attempts.forEach(function (a) { if (msg.indexOf(a.id) >= 0) a.unavailable = true; });
-        if (!conn && attempts.some(function (a) { return !a.c && !a.gone; })) launchRest(); // el último lugar está vacío: probar los otros ya
-        settleFailed(); return;
-      }
-      cam = 'sin-red'; render(); later(start, 6000);
-    });
-    p.on('disconnected', function () { if (p === peer) later(function () { try { p.reconnect(); } catch (e) { start(); } }, 3000); });
+    p.on('disconnected', function () { if (p === peer) setTimeout(function () { if (p === peer && p.disconnected && !p.destroyed) { try { p.reconnect(); } catch (e) { startSoon(); } } }, 1500); });
+    p.on('error', function (err) { if (p === peer && !(err && err.type === 'peer-unavailable')) { lastErr = 'video: ' + (err && err.type); render(); startSoon(); } });
   }
-  function later(fn, ms) { clearTimeout(retry); retry = setTimeout(function () { retry = null; fn(); }, ms); }
-
-  // La cámara puede estar en cualquiera de 3 lugares del servidor: pruebo los 3 y me quedo con el que contesta.
-  var SLOTS = 3, attempts = [];
-  function slotId(i) { return camId(code) + '-' + i; }
-  function closeAttempts(keep) {
-    var list = attempts; attempts = [];
-    clearTimeout(staggerTimer); staggerTimer = null;
-    list.forEach(function (a) { if (a.c !== keep) { a.gone = true; if (a.c) { try { a.c.close(); } catch (e) {} } } });
-  }
-  function settleFailed() {
-    if (conn || !attempts.length) return;
-    if (!attempts.every(function (a) { return a.gone || a.unavailable; })) return;
-    clearTimeout(openTimer);
-    var found = attempts.some(function (a) { return !a.unavailable; });
-    attempts = [];
-    var secs = Math.round((Date.now() - since) / 1000);
-    cam = found ? 'sin-ruta' : 'apagada'; camMsg = '';
-    lastErr = found ? ((lastErr.indexOf('conexión:') === 0 ? lastErr : 'la cámara no contestó') + ' (a los ' + secs + ' s)') : '';
-    render(); later(connectCam, found ? 1500 : 4000);
-  }
-  // Empieza por el último lugar que funcionó; los otros dos se prueban 1,5 s después si hace falta.
-  var SLOT_KEY = KEY + '.lugar', lastSlot = -1, staggerTimer = null, connectMs = 0, route = '';
-  try { lastSlot = parseInt(localStorage.getItem(SLOT_KEY), 10); if (!(lastSlot >= 0 && lastSlot < SLOTS)) lastSlot = -1; } catch (e) {}
-  function launch(a) {
-    if (a.c || a.gone || !peer || !peer.open) return;
-    var c = peer.connect(a.id, { serialization: 'json', reliable: true });
-    a.c = c;
-    c.on('open', function () { try { c.send({ t: 'hola', code: code }); } catch (e) {} });
-    c.on('data', function (m) { onData(c, m); });
-    var end = function () {
-      a.gone = true;
-      if (conn === c) { conn = null; hasVideo = false; route = ''; cam = 'apagada'; camMsg = ''; render(); later(connectCam, 1500); }
-      else settleFailed();
-    };
-    c.on('close', end);
-    c.on('error', function (e) { lastErr = 'conexión: ' + String((e && (e.message || e.type)) || 'error').slice(0, 60); end(); });
-  }
-  function launchRest() {
-    clearTimeout(staggerTimer); staggerTimer = null;
-    if (!conn) attempts.forEach(launch);
-  }
-  function connectCam() {
-    if (!peer || peer.destroyed || peer.disconnected) { later(start, 2000); return; }
-    if (!peer.open) return; // al abrirse el servidor, 'open' vuelve a llamar acá
-    closeAttempts();
-    if (conn) { var old = conn; conn = null; try { old.close(); } catch (e) {} }
-    since = Date.now(); route = ''; connectMs = 0;
-    if (cam === 'sin-red' || cam === 'apagada' || cam === 'sin-ruta') { cam = 'buscando'; camMsg = ''; render(); }
-    var order = [0, 1, 2];
-    if (lastSlot >= 0) { order.splice(order.indexOf(lastSlot), 1); order.unshift(lastSlot); }
-    order.forEach(function (i) { attempts.push({ c: null, id: slotId(i), slot: i, gone: false, unavailable: false }); });
-    if (lastSlot >= 0) { launch(attempts[0]); staggerTimer = setTimeout(launchRest, 1500); }
-    else launchRest();
-    clearTimeout(openTimer);
-    openTimer = setTimeout(function () {
-      if (conn) return;
-      attempts.forEach(function (a) { a.gone = true; });
-      settleFailed(); closeAttempts();
-    }, 30000);
-  }
-  // Cómo quedaron conectados: directo por wifi, directo por internet o por relé.
+  function startSoon() { if (!restartTimer) restartTimer = setTimeout(startPeer, 3000); }
   function measureRoute(c) {
     var pc = c && c.peerConnection;
     if (!pc || !pc.getStats) return;
     pc.getStats().then(function (st) {
       var pair = null, byId = {};
       st.forEach(function (r) { byId[r.id] = r; });
-      st.forEach(function (r) {
-        if (r.type === 'transport' && r.selectedCandidatePairId) pair = byId[r.selectedCandidatePairId];
-      });
+      st.forEach(function (r) { if (r.type === 'transport' && r.selectedCandidatePairId) pair = byId[r.selectedCandidatePairId]; });
       if (!pair) st.forEach(function (r) { if (!pair && r.type === 'candidate-pair' && r.state === 'succeeded' && (r.selected || r.nominated)) pair = r; });
       if (!pair) return;
       var l = byId[pair.localCandidateId], rm = byId[pair.remoteCandidateId];
       var t = [l && l.candidateType, rm && rm.candidateType];
-      route = t.indexOf('relay') >= 0 ? 'por relé' : (t[0] === 'host' && t[1] === 'host' ? 'directa por wifi' : 'directa por internet');
+      route = t.indexOf('relay') >= 0 ? 'por relé' : (t[0] === 'host' && t[1] === 'host' ? 'directo por wifi' : 'directo por internet');
+      route += ' en ' + ((Date.now() - wantSince) / 1000).toFixed(1) + ' s';
       render();
     }).catch(function () {});
   }
-  function onData(c, m) {
-    if (!m || typeof m !== 'object') return;
-    if (!conn && (m.t === 'estado' || m.t === 'error')) {
-      attempts.forEach(function (a) {
-        if (a.c === c) { lastSlot = a.slot; try { localStorage.setItem(SLOT_KEY, String(a.slot)); } catch (e) {} }
-      });
-      conn = c; clearTimeout(openTimer); closeAttempts(c); lastErr = '';
-      connectMs = Date.now() - since;
-      setTimeout(function () { measureRoute(c); }, 300);
-    }
-    if (c !== conn) return;
-    if (m.t === 'estado') { cam = m.s; camMsg = m.msg || ''; liveSince = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0; render(); }
-    if (m.t === 'error') { cam = 'error'; camMsg = m.msg || ''; render(); }
-  }
 
-  // ---------- Controles ----------
-  $('toggle').onclick = function () {
-    if (cam === 'espera' || cam === 'error') { send({ t: 'on' }); cam = 'encendiendo'; camMsg = ''; }
-    else { send({ t: 'off' }); cam = 'espera'; }
+  // ---------- Encender / apagar ----------
+  function sendOn() { if (peer && peer.open) publish(code, 'cam', { t: 'on', v: peer.id, k: firma(code) }); }
+  function setWant(on) {
+    want = on; lastErr = '';
+    if (on) {
+      wantSince = Date.now(); sendOn();
+      clearTimeout(noVideoTimer);
+      noVideoTimer = setTimeout(function () { if (want && !hasVideo) { lastErr = 'el video tarda: reintentando'; render(); sendOn(); } }, 15000);
+    } else {
+      clearTimeout(noVideoTimer);
+      publish(code, 'cam', { t: 'off', v: peer && peer.id, k: firma(code) });
+      if (call) { try { call.close(); } catch (e) {} call = null; }
+      hasVideo = false; route = '';
+    }
     render();
-  };
-  // Safari pausa el video al salir de la pantalla completa (la cruz) y queda congelado: lo retomo solo.
+  }
+  $('toggle').onclick = function () { setWant(!want); };
+  // Mientras mirás, una señal cada 10 s. Si se corta, el 5s vuelve a reposo solo a los 30 s.
+  setInterval(function () { if (want && peer && peer.open) publish(code, 'cam', { t: 'ping', v: peer.id, k: firma(code) }); }, 10000);
+
+  // Safari pausa el video al salir de la pantalla completa (la cruz): lo retomo solo.
   function resumeVideo() {
     var v = $('video');
-    if (!v.srcObject || document.hidden || cam !== 'en-vivo') return;
-    v.muted = true;
-    var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
+    if (!v.srcObject || document.hidden || !hasVideo) return;
+    v.muted = true; var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
   }
-  ['webkitendfullscreen', 'webkitfullscreenchange', 'fullscreenchange', 'pause'].forEach(function (ev) {
-    var target = (ev === 'webkitfullscreenchange' || ev === 'fullscreenchange') ? document : $('video');
-    target.addEventListener(ev, function () { setTimeout(resumeVideo, 150); setTimeout(resumeVideo, 800); });
-  });
-  // De costado, tocar el video alterna entre llenar la pantalla y verlo entero.
+  ['webkitendfullscreen', 'pause'].forEach(function (ev) { $('video').addEventListener(ev, function () { setTimeout(resumeVideo, 150); setTimeout(resumeVideo, 800); }); });
+  ['webkitfullscreenchange', 'fullscreenchange'].forEach(function (ev) { document.addEventListener(ev, function () { setTimeout(resumeVideo, 150); setTimeout(resumeVideo, 800); }); });
   $('video').onclick = function () { $('monitor').classList.toggle('entera'); };
   $('full').onclick = function () {
     var v = $('video');
@@ -370,54 +405,49 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     else if (v.requestFullscreen) v.requestFullscreen().catch(function () {});
   };
   $('change').onclick = function () {
-    send({ t: 'off' });
+    if (want) setWant(false);
+    if (sub) { sub.close(); sub = null; }
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
-    conn = null;
     try { localStorage.removeItem(KEY); } catch (e) {}
+    lastSeen = 0; cam = 'buscando';
     $('code').value = ''; $('view').hidden = true; $('setup').hidden = false;
   };
   $('save').onclick = function () {
     var c = ($('code').value || '').replace(/\s+/g, '');
     if (c.length < 6) { $('err').textContent = 'El código tiene que tener al menos 6 caracteres.'; return; }
     code = c; try { localStorage.setItem(KEY, code); } catch (e) {}
-    $('err').textContent = ''; boot();
+    $('err').textContent = ''; $('pill').hidden = false; boot();
   };
 
-  // Señal de vida cada 10 s; si se corta, la cámara se apaga sola a los 30 s.
-  setInterval(function () { send({ t: 'ping' }); }, 10000);
   setInterval(function () {
     var d = new Date(); $('now').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes());
-    if (cam === 'en-vivo' && liveSince) $('elapsed').textContent = mmss(Date.now() - liveSince);
-    if (cam === 'buscando') render();
+    if (hasVideo && liveSince) $('elapsed').textContent = mmss(Date.now() - liveSince);
+    else if (hasVideo) $('elapsed').textContent = mmss(Date.now() - wantSince);
+    render();
   }, 1000);
-  // Si salís de la página, apaga la cámara para cuidar la batería del 5s.
-  // iOS corta las conexiones de las pestañas en segundo plano: al volver, arranca de cero.
+  // Al salir de la pantalla, apaga la cámara para cuidar la batería del 5s. Al volver, reconecta al instante.
   var hiddenAt = 0;
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) {
-      hiddenAt = Date.now();
-      if (cam === 'en-vivo' || cam === 'encendiendo') { send({ t: 'off' }); cam = 'espera'; render(); }
-    } else if (code && !$('view').hidden && Date.now() - hiddenAt > 3000) { conn = null; start(); }
+    if (document.hidden) { hiddenAt = Date.now(); if (want) setWant(false); return; }
+    if (!code || $('view').hidden) return;
+    if (Date.now() - hiddenAt > 3000) { if (sub) sub.reopen(); publish(code, 'cam', { t: 'hola', k: firma(code) }); }
+    if (!peer || peer.destroyed || peer.disconnected) startPeer();
   });
-  window.addEventListener('pageshow', function (e) { if (e.persisted && code && !$('view').hidden) { conn = null; start(); } });
-  window.addEventListener('pagehide', function () { send({ t: 'off' }); });
-  window.addEventListener('online', function () { if (code && !$('view').hidden) start(); });
-  // Vigilante: si algo quedó colgado más de 25 s, reinicia la conexión.
+  window.addEventListener('pagehide', function () { if (want) publish(code, 'cam', { t: 'off', v: peer && peer.id, k: firma(code) }); });
+  window.addEventListener('online', function () { if (code && !$('view').hidden) { if (sub) sub.reopen(); startPeer(); } });
   setInterval(function () {
     if (!code || $('view').hidden || document.hidden) return;
-    var stuck = (cam === 'sin-red' || cam === 'buscando') && Date.now() - since > 25000;
-    if (!peer || peer.destroyed || peer.disconnected || stuck) { lastErr = stuck ? 'reintentando' : lastErr; start(); }
-    else if (peer.open && !conn && !retry) connectCam();
-    render();
+    if (!peer || peer.destroyed) startPeer();
+    else if (peer.disconnected) { try { peer.reconnect(); } catch (e) { startPeer(); } }
   }, 10000);
 
   function boot() {
     $('setup').hidden = true; $('view').hidden = false;
-    cam = 'sin-red'; render(); start();
+    lastSeen = 0; cam = 'buscando'; render();
+    listen(); startPeer();
   }
   if (typeof Peer === 'undefined') { $('setup').hidden = false; $('err').textContent = 'No cargó la conexión. Revisá internet y recargá.'; return; }
   if (code) boot(); else { $('setup').hidden = false; $('pill').hidden = true; }
-  $('save').addEventListener('click', function () { $('pill').hidden = false; });
 })();
 </script>
 </body>

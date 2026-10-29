@@ -95,7 +95,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
-  <button id="reset" type="button">v9 · Cambiar código</button>
+  <button id="reset" type="button">v10 · Cambiar código</button>
 </div>
 
 <div id="spacer"></div>
@@ -104,13 +104,11 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
 <script>
 (function () {
   'use strict';
-  // Sin ?. ni ?? ni campos de clase: tiene que correr en Safari 12.
+  // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
+  var VER = 'v10';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
-  var code = '';
-  try { code = localStorage.getItem(KEY) || ''; } catch (e) {}
-
-  // ---------- Utilidades compartidas con la página de ver ----------
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
   function hash(str, seed) {
     var h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed, i, ch;
     for (i = 0; i < str.length; i++) {
@@ -122,216 +120,261 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
     return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
   }
-  function camId(c) { return 'cventana-' + hash(c, 1) + hash(c, 7); }
-  function peerOptions() {
-    // ?srv=host:puerto sirve para usar un servidor propio en vez del público de PeerJS.
-    var m = /[?&]srv=([^&]+)/.exec(location.search);
-    var o = { debug: 1 };
-    // Servidores para encontrar el camino entre los dos teléfonos: varios STUN y el relé de PeerJS.
-    o.config = { iceServers: [
-      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-      { urls: 'stun:stun.cloudflare.com:3478' },
-      { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' }
-    ] };
-    if (m) {
-      var p = decodeURIComponent(m[1]).split(':');
-      o.host = p[0]; o.port = parseInt(p[1] || '443', 10); o.path = '/'; o.secure = o.port === 443;
+  function param(name) {
+    var m = new RegExp('[?&]' + name + '=([^&]+)').exec(location.search);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  // SHA-1 / HMAC para las credenciales del relé gratuito (Open Relay, sin cuenta).
+  function sha1(bytes) {
+    var H = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
+    var b = bytes.slice(), ml = bytes.length * 8, i, t, w = new Array(80);
+    b.push(0x80);
+    while (b.length % 64 !== 56) b.push(0);
+    b.push(0, 0, 0, 0, (ml >>> 24) & 255, (ml >>> 16) & 255, (ml >>> 8) & 255, ml & 255);
+    for (i = 0; i < b.length; i += 64) {
+      for (t = 0; t < 16; t++) w[t] = (b[i + 4 * t] << 24) | (b[i + 4 * t + 1] << 16) | (b[i + 4 * t + 2] << 8) | b[i + 4 * t + 3];
+      for (t = 16; t < 80; t++) { var x = w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16]; w[t] = (x << 1) | (x >>> 31); }
+      var a = H[0], bb = H[1], c = H[2], d = H[3], e = H[4];
+      for (t = 0; t < 80; t++) {
+        var f, k;
+        if (t < 20) { f = (bb & c) | (~bb & d); k = 0x5A827999; }
+        else if (t < 40) { f = bb ^ c ^ d; k = 0x6ED9EBA1; }
+        else if (t < 60) { f = (bb & c) | (bb & d) | (c & d); k = 0x8F1BBCDC; }
+        else { f = bb ^ c ^ d; k = 0xCA62C1D6; }
+        var tmp = (((a << 5) | (a >>> 27)) + f + e + k + w[t]) | 0;
+        e = d; d = c; c = (bb << 30) | (bb >>> 2); bb = a; a = tmp;
+      }
+      H[0] = (H[0] + a) | 0; H[1] = (H[1] + bb) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0; H[4] = (H[4] + e) | 0;
     }
+    var out = [];
+    for (i = 0; i < 5; i++) out.push((H[i] >>> 24) & 255, (H[i] >>> 16) & 255, (H[i] >>> 8) & 255, H[i] & 255);
+    return out;
+  }
+  function bytesOf(s) { var o = []; for (var i = 0; i < s.length; i++) o.push(s.charCodeAt(i) & 255); return o; }
+  function hmacSha1B64(key, msg) {
+    var k = bytesOf(key), ip = [], op = [], i;
+    if (k.length > 64) k = sha1(k);
+    while (k.length < 64) k.push(0);
+    for (i = 0; i < 64; i++) { ip.push(k[i] ^ 0x36); op.push(k[i] ^ 0x5c); }
+    var r = sha1(op.concat(sha1(ip.concat(bytesOf(msg))))), s = '';
+    for (i = 0; i < r.length; i++) s += String.fromCharCode(r[i]);
+    return btoa(s);
+  }
+  // Caminos para el video: directo (STUN) y dos relés de respaldo, uno por el puerto 443 que pasa casi cualquier red.
+  function iceServers() {
+    var user = (Math.floor(Date.now() / 1000) + 2 * 86400) + ':cventana';
+    return [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+      { urls: ['turn:staticauth.openrelay.metered.ca:80', 'turn:staticauth.openrelay.metered.ca:443?transport=tcp'],
+        username: user, credential: hmacSha1B64('openrelayprojectsecret', user) },
+      { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' }
+    ];
+  }
+  function peerOptions() {
+    var o = { debug: 1, config: { iceServers: iceServers() } };
+    var srv = param('srv');
+    if (srv) { var p = srv.split(':'); o.host = p[0]; o.port = parseInt(p[1] || '443', 10); o.path = '/'; o.secure = o.port === 443; }
     return o;
   }
-  function show(id) {
-    ['setup', 'tap', 'aim', 'standby'].forEach(function (s) { $(s).hidden = s !== id; });
+
+  // ---------- Avisos instantáneos (ntfy.sh, gratis y sin cuenta) ----------
+  // El 5s avisa "estoy en espera" y recibe "encendé" por acá, sin depender de que los teléfonos se encuentren.
+  var NTFY = param('ntfy') || 'https://ntfy.sh';
+  function topic(code, kind) { return 'cventana-' + hash(code, 1) + hash(code, 7) + hash(code, 11) + '-' + kind; }
+  function firma(code) { return hash(code + '|ventana', 21); }
+  function publish(code, kind, obj) {
+    try {
+      var x = new XMLHttpRequest();
+      x.open('POST', NTFY + '/' + topic(code, kind), true);
+      x.send(JSON.stringify(obj));
+    } catch (e) {}
   }
-  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  // Suscripción con reconexión: si no llega nada (ni el "keepalive" de ntfy) en 100 s, se reabre.
+  function subscribe(code, kind, since, onMsg, onAlive) {
+    var es = null, last = 0, closed = false, first = true;
+    function open() {
+      if (closed) return;
+      try { if (es) es.close(); } catch (e) {}
+      var q = (first && since) ? '?since=' + since : '';
+      first = false;
+      es = new EventSource(NTFY + '/' + topic(code, kind) + '/sse' + q);
+      var alive = function () { last = Date.now(); onAlive(true); };
+      es.onopen = alive;
+      es.addEventListener('keepalive', alive);
+      es.addEventListener('open', alive);
+      es.onmessage = function (ev) {
+        alive();
+        try {
+          var d = JSON.parse(ev.data);
+          if (d.event && d.event !== 'message') return;
+          onMsg(JSON.parse(d.message), (d.time || 0) * 1000);
+        } catch (e) {}
+      };
+      es.onerror = function () { onAlive(false); };
+      last = Date.now();
+    }
+    var timer = setInterval(function () { if (Date.now() - last > 100000) open(); }, 10000);
+    open();
+    return { reopen: open, close: function () { closed = true; clearInterval(timer); try { es.close(); } catch (e) {} } };
+  }
+
+  var code = '';
+  try { code = localStorage.getItem(KEY) || ''; } catch (e) {}
+  function show(id) { ['setup', 'tap', 'aim', 'standby'].forEach(function (s) { $(s).hidden = s !== id; }); }
 
   // ---------- Cámara ----------
-  var stream = null;
-  function getCam() {
-    return navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 20, max: 24 } }
-    });
-  }
-  // Safari de iOS 12 se olvida del permiso si la cámara se apaga del todo.
-  // Por eso queda "en reposo": abierta a 1 cuadro por segundo, sin mostrarse ni enviarse.
+  // Safari de iOS 12 se olvida del permiso si la cámara se apaga del todo, así que queda abierta "en reposo":
+  // resolución mínima y 1 cuadro por segundo, sin mostrarse ni enviarse. Al encender pasa a 720p y 20 cuadros.
+  var REST = { width: { ideal: 192 }, height: { ideal: 144 }, frameRate: { ideal: 1 } };
+  var LIVE = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 20, max: 24 } };
   var warm = null;
-  function warmAlive() {
-    var t = warm && warm.getVideoTracks()[0];
-    return !!(t && t.readyState === 'live');
+  function getCam() {
+    return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment', width: LIVE.width, height: LIVE.height, frameRate: LIVE.frameRate } });
   }
-  function setRate(fps) {
+  function stopStream(s) { if (s) s.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); }
+  function warmAlive() { var t = warm && warm.getVideoTracks()[0]; return !!(t && t.readyState === 'live'); }
+  function applyMode(c) {
     if (!warmAlive()) return Promise.resolve();
-    try {
-      // En reposo solo se pide "lo más cerca de 1 por segundo" (sin máximo), para que el 5s no lo rechace.
-      var fr = fps <= 1 ? { ideal: 1 } : { ideal: fps, max: fps + 4 };
-      var r = warm.getVideoTracks()[0].applyConstraints({ width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: fr });
-      return (r && r.then) ? r.catch(function () {}) : Promise.resolve();
-    } catch (e) { return Promise.resolve(); }
+    try { var r = warm.getVideoTracks()[0].applyConstraints(c); return (r && r.then) ? r.catch(function () {}) : Promise.resolve(); }
+    catch (e) { return Promise.resolve(); }
   }
   function keepWarm(s) {
     if (warm && warm !== s) stopStream(warm);
     warm = s;
     var t = s.getVideoTracks()[0];
-    if (t) t.onended = function () { if (warm === s) warm = null; };
-    setRate(1);
-  }
-  function stopStream(s) {
-    if (!s) return;
-    s.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
+    if (t) t.onended = function () { if (warm === s) { warm = null; heartbeat(); } };
+    applyMode(REST);
   }
   function camError(e) {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return 'Este Safari no permite usar la cámara. Abrí la página en Safari, no desde un ícono de inicio.';
-    if (e && e.name === 'NotAllowedError') return 'No hay permiso para la cámara. Recargá la página y tocá Permitir.';
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return 'Este Safari no permite usar la cámara.';
+    if (e && e.name === 'NotAllowedError') return 'Sin permiso para la cámara: recargá y tocá Permitir.';
     return 'No pude abrir la cámara (' + (e && e.name ? e.name : 'error') + ').';
   }
 
   // ---------- Pantallas de arranque ----------
+  var preview = null;
   $('go').onclick = function () {
     var c = ($('code').value || '').replace(/\s+/g, '');
     if (c.length < 6) { $('err').textContent = 'El código tiene que tener al menos 6 caracteres.'; return; }
-    code = c;
-    try { localStorage.setItem(KEY, code); } catch (e) {}
+    code = c; try { localStorage.setItem(KEY, code); } catch (e) {}
     $('err').textContent = '';
-    getCam().then(function (s) {
-      stream = s;
-      var v = $('preview'); v.srcObject = s; v.play();
-      show('aim');
-    }).catch(function (e) { $('err').textContent = camError(e); });
+    getCam().then(function (s) { preview = s; var v = $('preview'); v.srcObject = s; v.play(); show('aim'); })
+      .catch(function (e) { $('err').textContent = camError(e); });
   };
   $('ready').onclick = function () {
     $('preview').srcObject = null;
-    if (stream) keepWarm(stream);
-    stream = null;
+    if (preview) keepWarm(preview);
+    preview = null;
     goStandby();
   };
   $('tapGo').onclick = function () {
-    getCam().then(function (s) { keepWarm(s); goStandby(); })
-      .catch(function (e) { $('tapErr').textContent = camError(e); });
+    getCam().then(function (s) { keepWarm(s); goStandby(); }).catch(function (e) { $('tapErr').textContent = camError(e); });
   };
   $('reset').onclick = function () {
     turnOff();
     if (warm) { stopStream(warm); warm = null; }
+    if (sub) { sub.close(); sub = null; }
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
     try { localStorage.removeItem(KEY); } catch (e) {}
-    $('code').value = '';
-    document.body.className = '';
-    window.scrollTo(0, 0);
+    $('code').value = ''; document.body.className = ''; window.scrollTo(0, 0);
     show('setup');
   };
 
   // ---------- Estado ----------
-  var state = 'sin-red', liveSince = 0, netOk = false;
-  var LABELS = {
-    'sin-red': 'Conectando', 'espera': 'En espera', 'encendiendo': 'Encendiendo',
-    'en-vivo': 'Transmitiendo', 'permiso': 'Tocá para permitir', 'error': 'Error'
-  };
+  var state = 'espera', liveSince = 0, msgOk = false, peerOk = false, lastPing = 0, viewer = '', note = '';
+  var LABELS = { 'espera': 'En espera', 'encendiendo': 'Encendiendo', 'en-vivo': 'Transmitiendo', 'permiso': 'Tocá para permitir', 'error': 'Error' };
   function setState(s, msg) {
-    state = s;
-    var shown = (!netOk && (s === 'espera')) ? 'sin-red' : s;
-    $('state').setAttribute('data-s', shown);
-    $('stateText').textContent = LABELS[shown] || shown;
-    $('sub').textContent = msg || (s === 'espera' && netOk ? (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso') : '');
+    state = s; note = msg || '';
     if (s === 'en-vivo' && !liveSince) liveSince = Date.now();
     if (s !== 'en-vivo') liveSince = 0;
-    send({ t: 'estado', s: s, ms: liveSince ? Date.now() - liveSince : 0, msg: msg || '' });
+    paint(); heartbeat();
   }
-  function tick() {
-    var d = new Date();
-    $('clock').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes());
+  function paint() {
+    var shown = (!msgOk || !peerOk) && state === 'espera' ? 'sin-red' : state;
+    $('state').setAttribute('data-s', shown);
+    $('stateText').textContent = shown === 'sin-red' ? 'Conectando' : (LABELS[state] || state);
+    $('sub').textContent = note || (state === 'espera' && msgOk && peerOk ? (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso') : '');
+  }
+  function tick() { var d = new Date(); $('clock').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+  // Latido: cada 30 s (y en cada cambio) avisa en qué estado está. Tu iPhone lo ve al instante al abrir la página.
+  var lastBeat = 0;
+  function heartbeat() {
+    if (!code || $('standby').hidden) return;
+    lastBeat = Date.now();
+    publish(code, 'vis', { t: 'estado', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive(), video: peerOk, msg: note, v: VER });
   }
 
-  // ---------- Conexión ----------
-  var peer = null, conn = null, call = null, lastPing = 0, restartTimer = null, slot = 0, SLOTS = 3;
-  function send(m) { if (conn && conn.open) { try { conn.send(m); } catch (e) {} } }
+  // ---------- Órdenes desde tu iPhone ----------
+  var sub = null;
+  function listen() {
+    if (sub) sub.close();
+    sub = subscribe(code, 'cam', '', function (m) {
+      if (!m || m.k !== firma(code)) return;
+      if (m.t === 'hola') { heartbeat(); return; }
+      if (m.t === 'on') { lastPing = Date.now(); viewer = m.v || viewer; turnOn(); return; }
+      if (m.t === 'ping') { lastPing = Date.now(); if (m.v && state === 'espera') { viewer = m.v; turnOn(); } return; }
+      if (m.t === 'off') { if (!m.v || m.v === viewer) turnOff(); }
+    }, function (ok) {
+      var was = msgOk; msgOk = ok; paint();
+      if (ok && !was) heartbeat();
+    });
+  }
 
+  // ---------- Video (PeerJS, con identificador nuevo en cada arranque: no hay "lugares" que se ocupen) ----------
+  var peer = null, call = null, restartTimer = null, callTimer = null;
   function startPeer() {
     clearTimeout(restartTimer); restartTimer = null;
-    if (peer) { try { peer.destroy(); } catch (e) {} }
-    netOk = false; setState(state === 'sin-red' ? 'espera' : state);
-    // Hay 3 "lugares" en el servidor. Si una pestaña vieja dormida quedó ocupando uno, uso el siguiente.
-    var p = new Peer(camId(code) + '-' + slot, peerOptions());
+    if (peer) { var old = peer; peer = null; try { old.destroy(); } catch (e) {} }
+    peerOk = false; paint();
+    var p = new Peer(peerOptions());
     peer = p;
-    p.on('open', function () { if (p !== peer) return; netOk = true; setState(state); });
-    p.on('connection', onConn);
+    p.on('open', function () { if (p === peer) { peerOk = true; paint(); heartbeat(); } });
     p.on('disconnected', function () {
       if (p !== peer) return;
-      netOk = false; setState(state);
-      setTimeout(function () { if (p === peer && !p.destroyed && p.disconnected) { try { p.reconnect(); } catch (e) { restartSoon(); } } }, 3000);
+      peerOk = false; paint();
+      setTimeout(function () { if (p === peer && !p.destroyed && p.disconnected) { try { p.reconnect(); } catch (e) { restartSoon(); } } }, 2000);
     });
     p.on('error', function (err) {
       if (p !== peer) return;
       var t = err && err.type;
-      if (t === 'peer-unavailable') return; // el que miraba se fue
-      if (t === 'unavailable-id') {
-        slot = (slot + 1) % SLOTS;
-        clearTimeout(restartTimer);
-        restartTimer = setTimeout(startPeer, slot === 0 ? 8000 : 800);
-        return;
-      }
-      netOk = false; setState(state, '');
-      restartSoon();
+      if (t === 'peer-unavailable') { if (state !== 'espera') turnOff('Tu iPhone ya no está'); return; }
+      peerOk = false; paint(); restartSoon();
     });
   }
-  function restartSoon() {
-    if (restartTimer) return;
-    restartTimer = setTimeout(startPeer, 8000);
-  }
-
-  // Conexiones entrantes que todavía no dijeron "hola": si quedan colgadas, se cierran para no saturar al 5s.
-  var pending = [];
-  function onConn(c) {
-    var authed = false;
-    pending.push({ c: c, t: Date.now() });
-    while (pending.length > 4) { var x = pending.shift(); if (x.c !== conn) { try { x.c.close(); } catch (e) {} } }
-    c.on('data', function (m) {
-      if (!m || typeof m !== 'object') return;
-      if (m.t === 'hola') {
-        if (m.code !== code) { try { c.send({ t: 'error', msg: 'Código incorrecto' }); } catch (e) {} setTimeout(function () { c.close(); }, 600); return; }
-        authed = true;
-        pending = pending.filter(function (x) {
-          if (x.c !== c) { try { x.c.close(); } catch (e) {} return false; }
-          return false;
-        });
-        if (conn && conn !== c) { var old = conn; conn = null; endCall(); try { old.close(); } catch (e) {} }
-        conn = c; lastPing = Date.now();
-        send({ t: 'estado', s: state === 'sin-red' ? 'espera' : state, ms: liveSince ? Date.now() - liveSince : 0, msg: '' });
-        return;
-      }
-      if (!authed) return;
-      lastPing = Date.now();
-      if (m.t === 'on') turnOn();
-      else if (m.t === 'off') turnOff();
-    });
-    var gone = function () { if (conn === c) { conn = null; turnOff(); } };
-    c.on('close', gone);
-    c.on('error', gone);
-  }
+  function restartSoon() { if (!restartTimer) restartTimer = setTimeout(startPeer, 4000); }
 
   function turnOn() {
-    if (state === 'en-vivo' && stream) { if (!call) placeCall(); return; }
-    if (state === 'encendiendo' || state === 'permiso') return;
+    if (!viewer) return;
+    if (call && call.peer === viewer && (state === 'en-vivo' || state === 'encendiendo')) return;
+    endCall();
     setState('encendiendo');
-    if (warmAlive()) {
-      // Sin pedir permiso: solo sube de 1 a 20 cuadros por segundo.
-      setRate(20).then(function () {
-        if (!conn || state !== 'encendiendo') { setRate(1); return; }
-        stream = warm;
-        placeCall();
+    var go = function () {
+      if (state !== 'encendiendo' || !peer || !peer.open) { if (!peer || !peer.open) setState('error', 'Sin conexión de video, reintentando'); return; }
+      applyMode(LIVE).then(function () {
+        if (state !== 'encendiendo') return;
+        var c = peer.call(viewer, warm);
+        call = c;
+        var pc = c.peerConnection;
+        var check = function () {
+          var s = pc && (pc.iceConnectionState || '');
+          if (call !== c) return;
+          if (s === 'connected' || s === 'completed') { clearTimeout(callTimer); setState('en-vivo'); capBitrate(c, 1500000); }
+          if (s === 'failed') turnOff('No hubo camino para el video');
+        };
+        if (pc) pc.addEventListener('iceconnectionstatechange', check);
+        c.on('close', function () { if (call === c) { call = null; turnOff(); } });
+        c.on('error', function () { if (call === c) { call = null; turnOff('El video se cortó'); } });
+        clearTimeout(callTimer);
+        callTimer = setTimeout(function () { if (call === c && state === 'encendiendo') turnOff('El video no llegó a conectar'); }, 25000);
       });
-      return;
-    }
-    var waiting = setTimeout(function () { if (state === 'encendiendo') setState('permiso', 'Safari está pidiendo permiso'); }, 10000);
+    };
+    if (warmAlive()) { go(); return; }
+    var waiting = setTimeout(function () { if (state === 'encendiendo') setState('permiso', 'Safari está pidiendo permiso'); }, 8000);
     getCam().then(function (s) {
-      clearTimeout(waiting);
-      keepWarm(s);
-      if (!conn || (state !== 'encendiendo' && state !== 'permiso')) return;
-      setRate(20);
-      stream = s;
-      placeCall();
-    }).catch(function (e) {
-      clearTimeout(waiting);
-      setState(e && e.name === 'NotAllowedError' ? 'permiso' : 'error', camError(e));
-    });
+      clearTimeout(waiting); keepWarm(s);
+      if (state === 'encendiendo' || state === 'permiso') { state = 'encendiendo'; go(); }
+    }).catch(function (e) { clearTimeout(waiting); setState(e && e.name === 'NotAllowedError' ? 'permiso' : 'error', camError(e)); });
   }
   function capBitrate(c, bps) {
     try {
@@ -342,32 +385,22 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
         var prm = snd.getParameters();
         if (!prm.encodings || !prm.encodings.length) prm.encodings = [{}];
         prm.encodings[0].maxBitrate = bps;
-        var r = snd.setParameters(prm);
-        if (r && r.catch) r.catch(function () {});
+        var r = snd.setParameters(prm); if (r && r.catch) r.catch(function () {});
       });
     } catch (e) {}
   }
-  function placeCall() {
-    if (!conn || !stream || !peer) return;
-    var c = peer.call(conn.peer, stream);
-    call = c;
-    c.on('close', function () { if (call === c) { call = null; turnOff(); } });
-    c.on('error', function () { if (call === c) { call = null; turnOff(); } });
-    setState('en-vivo');
-    // En vivo: 20 cuadros por segundo y tope de 1,5 Mbps, para que se vea fluido al moverse.
-    setTimeout(function () { capBitrate(c, 1500000); }, 2500);
-  }
   function endCall() {
+    clearTimeout(callTimer);
     if (call) { var c = call; call = null; try { c.close(); } catch (e) {} }
-    if (stream && stream === warm) setRate(1); else stopStream(stream);
-    stream = null;
   }
-  function turnOff() {
+  function turnOff(msg) {
     endCall();
-    if (state !== 'sin-red') setState('espera');
+    applyMode(REST);
+    setState('espera', msg || '');
+    if (msg) setTimeout(function () { if (state === 'espera' && note === msg) { note = ''; paint(); } }, 15000);
   }
 
-  // Al deslizar, Safari achica sus barras; el aviso se esconde y no vuelve a molestar.
+  // ---------- Pantalla de espera ----------
   function checkHint() {
     var y = window.pageYOffset || document.documentElement.scrollTop || 0;
     $('hint').className = y > 30 ? 'hint gone' : 'hint';
@@ -375,43 +408,33 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   window.addEventListener('scroll', checkHint);
   function goStandby() {
     document.body.className = 'standby';
-    checkHint();
-    show('standby');
-    tick();
-    startPeer();
+    checkHint(); show('standby'); tick();
+    listen(); startPeer(); setState('espera');
   }
 
-  // Si quien mira deja de responder 30 s, la cámara se apaga sola.
+  setInterval(tick, 10000);
+  setInterval(function () { if (!$('standby').hidden && Date.now() - lastBeat > 29000) heartbeat(); }, 5000);
+  // Si tu iPhone deja de dar señales 30 s, la cámara vuelve a reposo sola.
   setInterval(function () {
     if ((state === 'en-vivo' || state === 'encendiendo' || state === 'permiso') && Date.now() - lastPing > 30000) turnOff();
   }, 5000);
-  // Vigilante: si se cortó el servidor, reintenta.
+  // Vigilante del video: reconecta si se cayó; cada 6 h sin uso se renueva (credenciales del relé frescas).
+  var peerBorn = Date.now();
   setInterval(function () {
-    if (!$('standby').hidden && code) {
-      if (!peer || peer.destroyed) startPeer();
-      else if (peer.disconnected) { try { peer.reconnect(); } catch (e) { restartSoon(); } }
-    }
+    if ($('standby').hidden || !code) return;
+    if (!peer || peer.destroyed) startPeer();
+    else if (peer.disconnected) { try { peer.reconnect(); } catch (e) { restartSoon(); } }
+    else if (state === 'espera' && Date.now() - peerBorn > 6 * 3600 * 1000) { peerBorn = Date.now(); startPeer(); }
   }, 20000);
-  setInterval(tick, 10000);
-  setInterval(function () {
-    var now = Date.now();
-    pending = pending.filter(function (x) {
-      if (now - x.t > 20000) { try { x.c.close(); } catch (e) {} return false; }
-      return true;
-    });
-  }, 5000);
-  // Cada 20 minutos sin uso renueva su lugar en el servidor, por si la conexión quedó "zombi".
-  setInterval(function () {
-    if (!$('standby').hidden && code && state === 'espera' && !conn) startPeer();
-  }, 20 * 60 * 1000);
   document.addEventListener('visibilitychange', function () {
-    if (!document.hidden && !$('standby').hidden && (!peer || peer.disconnected || peer.destroyed)) startPeer();
+    if (document.hidden || $('standby').hidden) return;
+    if (sub) sub.reopen();
+    if (!peer || peer.disconnected || peer.destroyed) startPeer();
+    heartbeat();
   });
 
   // ---------- Arranque ----------
-  if (typeof Peer === 'undefined') {
-    show('setup'); $('err').textContent = 'No cargó la conexión. Revisá internet y recargá.'; return;
-  }
+  if (typeof Peer === 'undefined') { show('setup'); $('err').textContent = 'No cargó la conexión. Revisá internet y recargá.'; return; }
   if (code) show('tap'); else show('setup');
 })();
 </script>
