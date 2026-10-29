@@ -143,7 +143,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   function getCam() {
     return navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 10, max: 12 } }
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 20, max: 24 } }
     });
   }
   // Safari de iOS 12 se olvida del permiso si la cámara se apaga del todo.
@@ -157,7 +157,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     if (!warmAlive()) return Promise.resolve();
     try {
       // En reposo solo se pide "lo más cerca de 1 por segundo" (sin máximo), para que el 5s no lo rechace.
-      var fr = fps <= 1 ? { ideal: 1 } : { ideal: fps, max: fps + 2 };
+      var fr = fps <= 1 ? { ideal: 1 } : { ideal: fps, max: fps + 4 };
       var r = warm.getVideoTracks()[0].applyConstraints({ width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: fr });
       return (r && r.then) ? r.catch(function () {}) : Promise.resolve();
     } catch (e) { return Promise.resolve(); }
@@ -298,8 +298,8 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     if (state === 'encendiendo' || state === 'permiso') return;
     setState('encendiendo');
     if (warmAlive()) {
-      // Sin pedir permiso: solo sube de 1 a 10 cuadros por segundo.
-      setRate(10).then(function () {
+      // Sin pedir permiso: solo sube de 1 a 20 cuadros por segundo.
+      setRate(20).then(function () {
         if (!conn || state !== 'encendiendo') { setRate(1); return; }
         stream = warm;
         placeCall();
@@ -311,7 +311,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
       clearTimeout(waiting);
       keepWarm(s);
       if (!conn || (state !== 'encendiendo' && state !== 'permiso')) return;
-      setRate(10);
+      setRate(20);
       stream = s;
       placeCall();
     }).catch(function (e) {
@@ -340,8 +340,8 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     c.on('close', function () { if (call === c) { call = null; turnOff(); } });
     c.on('error', function () { if (call === c) { call = null; turnOff(); } });
     setState('en-vivo');
-    // 10 cuadros por segundo y tope de 0,7 Mbps: menos trabajo para el 5s y menos batería.
-    setTimeout(function () { capBitrate(c, 700000); }, 2500);
+    // En vivo: 20 cuadros por segundo y tope de 1,5 Mbps, para que se vea fluido al moverse.
+    setTimeout(function () { capBitrate(c, 1500000); }, 2500);
   }
   function endCall() {
     if (call) { var c = call; call = null; try { c.close(); } catch (e) {} }

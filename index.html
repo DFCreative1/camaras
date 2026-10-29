@@ -301,7 +301,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       if (conn) return;
       attempts.forEach(function (a) { a.gone = true; });
       settleFailed(); closeAttempts();
-    }, 10000);
+    }, 30000);
   }
   // Cómo quedaron conectados: directo por wifi, directo por internet o por relé.
   function measureRoute(c) {
