@@ -158,6 +158,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   function peerOptions() {
     var m = /[?&]srv=([^&]+)/.exec(location.search);
     var o = { debug: 1 };
+    // Servidores para encontrar el camino entre los dos teléfonos: varios STUN y el relé de PeerJS.
+    o.config = { iceServers: [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' }
+    ] };
     if (m) {
       var p = decodeURIComponent(m[1]).split(':');
       o.host = p[0]; o.port = parseInt(p[1] || '443', 10); o.path = '/'; o.secure = o.port === 443;
@@ -198,7 +204,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     btn.textContent = on ? 'Apagar cámara' : 'Encender cámara';
     btn.className = on ? 'main off' : 'main';
     btn.disabled = !(conn && conn.open) || cam === 'sin-red' || cam === 'buscando' || cam === 'sin-ruta' || cam === 'apagada';
-    $('diag').textContent = 'Diagnóstico: servidor ' + (peer && peer.open ? 'conectado' : 'no conectado') +
+    $('diag').textContent = 'v9 · servidor ' + (peer && peer.open ? 'conectado' : 'no conectado') +
       ' · cámara ' + (conn && conn.open ? 'conectada' : (cam === 'apagada' ? 'no registrada' : cam === 'sin-ruta' ? 'sin ruta directa' : 'buscando')) +
       (conn && conn.open && route ? ' · ' + route : '') +
       (conn && conn.open && connectMs ? ' · conectó en ' + (connectMs / 1000).toFixed(1) + ' s' : '') +
@@ -261,7 +267,9 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     clearTimeout(openTimer);
     var found = attempts.some(function (a) { return !a.unavailable; });
     attempts = [];
-    cam = found ? 'sin-ruta' : 'apagada'; camMsg = ''; lastErr = found ? 'la cámara no contestó' : '';
+    var secs = Math.round((Date.now() - since) / 1000);
+    cam = found ? 'sin-ruta' : 'apagada'; camMsg = '';
+    lastErr = found ? ((lastErr.indexOf('conexión:') === 0 ? lastErr : 'la cámara no contestó') + ' (a los ' + secs + ' s)') : '';
     render(); later(connectCam, found ? 1500 : 4000);
   }
   // Empieza por el último lugar que funcionó; los otros dos se prueban 1,5 s después si hace falta.
@@ -278,7 +286,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       if (conn === c) { conn = null; hasVideo = false; route = ''; cam = 'apagada'; camMsg = ''; render(); later(connectCam, 1500); }
       else settleFailed();
     };
-    c.on('close', end); c.on('error', end);
+    c.on('close', end);
+    c.on('error', function (e) { lastErr = 'conexión: ' + String((e && (e.message || e.type)) || 'error').slice(0, 60); end(); });
   }
   function launchRest() {
     clearTimeout(staggerTimer); staggerTimer = null;

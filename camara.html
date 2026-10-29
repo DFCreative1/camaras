@@ -95,7 +95,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
-  <button id="reset" type="button">Cambiar código</button>
+  <button id="reset" type="button">v9 · Cambiar código</button>
 </div>
 
 <div id="spacer"></div>
@@ -127,6 +127,12 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     // ?srv=host:puerto sirve para usar un servidor propio en vez del público de PeerJS.
     var m = /[?&]srv=([^&]+)/.exec(location.search);
     var o = { debug: 1 };
+    // Servidores para encontrar el camino entre los dos teléfonos: varios STUN y el relé de PeerJS.
+    o.config = { iceServers: [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' }
+    ] };
     if (m) {
       var p = decodeURIComponent(m[1]).split(':');
       o.host = p[0]; o.port = parseInt(p[1] || '443', 10); o.path = '/'; o.secure = o.port === 443;
@@ -271,13 +277,21 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     restartTimer = setTimeout(startPeer, 8000);
   }
 
+  // Conexiones entrantes que todavía no dijeron "hola": si quedan colgadas, se cierran para no saturar al 5s.
+  var pending = [];
   function onConn(c) {
     var authed = false;
+    pending.push({ c: c, t: Date.now() });
+    while (pending.length > 4) { var x = pending.shift(); if (x.c !== conn) { try { x.c.close(); } catch (e) {} } }
     c.on('data', function (m) {
       if (!m || typeof m !== 'object') return;
       if (m.t === 'hola') {
         if (m.code !== code) { try { c.send({ t: 'error', msg: 'Código incorrecto' }); } catch (e) {} setTimeout(function () { c.close(); }, 600); return; }
         authed = true;
+        pending = pending.filter(function (x) {
+          if (x.c !== c) { try { x.c.close(); } catch (e) {} return false; }
+          return false;
+        });
         if (conn && conn !== c) { var old = conn; conn = null; endCall(); try { old.close(); } catch (e) {} }
         conn = c; lastPing = Date.now();
         send({ t: 'estado', s: state === 'sin-red' ? 'espera' : state, ms: liveSince ? Date.now() - liveSince : 0, msg: '' });
@@ -379,6 +393,17 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     }
   }, 20000);
   setInterval(tick, 10000);
+  setInterval(function () {
+    var now = Date.now();
+    pending = pending.filter(function (x) {
+      if (now - x.t > 20000) { try { x.c.close(); } catch (e) {} return false; }
+      return true;
+    });
+  }, 5000);
+  // Cada 20 minutos sin uso renueva su lugar en el servidor, por si la conexión quedó "zombi".
+  setInterval(function () {
+    if (!$('standby').hidden && code && state === 'espera' && !conn) startPeer();
+  }, 20 * 60 * 1000);
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden && !$('standby').hidden && (!peer || peer.disconnected || peer.destroyed)) startPeer();
   });
