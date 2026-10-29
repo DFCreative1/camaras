@@ -183,7 +183,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   };
   function render() {
     $('pill').setAttribute('data-s', cam);
-    $('pillText').textContent = PILL[cam] || cam;
+    $('pillText').textContent = (PILL[cam] || cam) + (cam === 'buscando' ? ' · ' + Math.round((Date.now() - since) / 1000) + ' s' : '');
     $('monitor').setAttribute('data-s', cam);
     var live = cam === 'en-vivo' && hasVideo;
     $('video').hidden = !live; $('hud').hidden = !live; $('full').hidden = !live;
@@ -200,6 +200,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     btn.disabled = !(conn && conn.open) || cam === 'sin-red' || cam === 'buscando' || cam === 'sin-ruta' || cam === 'apagada';
     $('diag').textContent = 'Diagnóstico: servidor ' + (peer && peer.open ? 'conectado' : 'no conectado') +
       ' · cámara ' + (conn && conn.open ? 'conectada' : (cam === 'apagada' ? 'no registrada' : cam === 'sin-ruta' ? 'sin ruta directa' : 'buscando')) +
+      (conn && conn.open && route ? ' · ' + route : '') +
+      (conn && conn.open && connectMs ? ' · conectó en ' + (connectMs / 1000).toFixed(1) + ' s' : '') +
       (lastErr ? ' · ' + lastErr : '') + ' · ' + (navigator.onLine === false ? 'sin internet' : 'online');
   }
 
@@ -236,6 +238,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       if (err && err.type === 'peer-unavailable') {
         var msg = String(err.message || '');
         attempts.forEach(function (a) { if (msg.indexOf(a.id) >= 0) a.unavailable = true; });
+        if (!conn && attempts.some(function (a) { return !a.c && !a.gone; })) launchRest(); // el último lugar está vacío: probar los otros ya
         settleFailed(); return;
       }
       cam = 'sin-red'; render(); later(start, 6000);
@@ -249,7 +252,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   function slotId(i) { return camId(code) + '-' + i; }
   function closeAttempts(keep) {
     var list = attempts; attempts = [];
-    list.forEach(function (a) { if (a.c !== keep) { a.gone = true; try { a.c.close(); } catch (e) {} } });
+    clearTimeout(staggerTimer); staggerTimer = null;
+    list.forEach(function (a) { if (a.c !== keep) { a.gone = true; if (a.c) { try { a.c.close(); } catch (e) {} } } });
   }
   function settleFailed() {
     if (conn || !attempts.length) return;
@@ -258,38 +262,75 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     var found = attempts.some(function (a) { return !a.unavailable; });
     attempts = [];
     cam = found ? 'sin-ruta' : 'apagada'; camMsg = ''; lastErr = found ? 'la cámara no contestó' : '';
-    render(); later(connectCam, 5000);
+    render(); later(connectCam, found ? 1500 : 4000);
+  }
+  // Empieza por el último lugar que funcionó; los otros dos se prueban 1,5 s después si hace falta.
+  var SLOT_KEY = KEY + '.lugar', lastSlot = -1, staggerTimer = null, connectMs = 0, route = '';
+  try { lastSlot = parseInt(localStorage.getItem(SLOT_KEY), 10); if (!(lastSlot >= 0 && lastSlot < SLOTS)) lastSlot = -1; } catch (e) {}
+  function launch(a) {
+    if (a.c || a.gone || !peer || !peer.open) return;
+    var c = peer.connect(a.id, { serialization: 'json', reliable: true });
+    a.c = c;
+    c.on('open', function () { try { c.send({ t: 'hola', code: code }); } catch (e) {} });
+    c.on('data', function (m) { onData(c, m); });
+    var end = function () {
+      a.gone = true;
+      if (conn === c) { conn = null; hasVideo = false; route = ''; cam = 'apagada'; camMsg = ''; render(); later(connectCam, 1500); }
+      else settleFailed();
+    };
+    c.on('close', end); c.on('error', end);
+  }
+  function launchRest() {
+    clearTimeout(staggerTimer); staggerTimer = null;
+    if (!conn) attempts.forEach(launch);
   }
   function connectCam() {
     if (!peer || peer.destroyed || peer.disconnected) { later(start, 2000); return; }
     if (!peer.open) return; // al abrirse el servidor, 'open' vuelve a llamar acá
     closeAttempts();
     if (conn) { var old = conn; conn = null; try { old.close(); } catch (e) {} }
-    since = Date.now();
+    since = Date.now(); route = ''; connectMs = 0;
     if (cam === 'sin-red' || cam === 'apagada' || cam === 'sin-ruta') { cam = 'buscando'; camMsg = ''; render(); }
-    for (var i = 0; i < SLOTS; i++) (function (i) {
-      var c = peer.connect(slotId(i), { serialization: 'json', reliable: true });
-      var a = { c: c, id: slotId(i), gone: false, unavailable: false };
-      attempts.push(a);
-      c.on('open', function () { try { c.send({ t: 'hola', code: code }); } catch (e) {} });
-      c.on('data', function (m) { onData(c, m); });
-      var end = function () {
-        a.gone = true;
-        if (conn === c) { conn = null; hasVideo = false; cam = 'apagada'; camMsg = ''; render(); later(connectCam, 3000); }
-        else settleFailed();
-      };
-      c.on('close', end); c.on('error', end);
-    })(i);
+    var order = [0, 1, 2];
+    if (lastSlot >= 0) { order.splice(order.indexOf(lastSlot), 1); order.unshift(lastSlot); }
+    order.forEach(function (i) { attempts.push({ c: null, id: slotId(i), slot: i, gone: false, unavailable: false }); });
+    if (lastSlot >= 0) { launch(attempts[0]); staggerTimer = setTimeout(launchRest, 1500); }
+    else launchRest();
     clearTimeout(openTimer);
     openTimer = setTimeout(function () {
       if (conn) return;
       attempts.forEach(function (a) { a.gone = true; });
       settleFailed(); closeAttempts();
-    }, 15000);
+    }, 10000);
+  }
+  // Cómo quedaron conectados: directo por wifi, directo por internet o por relé.
+  function measureRoute(c) {
+    var pc = c && c.peerConnection;
+    if (!pc || !pc.getStats) return;
+    pc.getStats().then(function (st) {
+      var pair = null, byId = {};
+      st.forEach(function (r) { byId[r.id] = r; });
+      st.forEach(function (r) {
+        if (r.type === 'transport' && r.selectedCandidatePairId) pair = byId[r.selectedCandidatePairId];
+      });
+      if (!pair) st.forEach(function (r) { if (!pair && r.type === 'candidate-pair' && r.state === 'succeeded' && (r.selected || r.nominated)) pair = r; });
+      if (!pair) return;
+      var l = byId[pair.localCandidateId], rm = byId[pair.remoteCandidateId];
+      var t = [l && l.candidateType, rm && rm.candidateType];
+      route = t.indexOf('relay') >= 0 ? 'por relé' : (t[0] === 'host' && t[1] === 'host' ? 'directa por wifi' : 'directa por internet');
+      render();
+    }).catch(function () {});
   }
   function onData(c, m) {
     if (!m || typeof m !== 'object') return;
-    if (!conn && (m.t === 'estado' || m.t === 'error')) { conn = c; clearTimeout(openTimer); closeAttempts(c); lastErr = ''; }
+    if (!conn && (m.t === 'estado' || m.t === 'error')) {
+      attempts.forEach(function (a) {
+        if (a.c === c) { lastSlot = a.slot; try { localStorage.setItem(SLOT_KEY, String(a.slot)); } catch (e) {} }
+      });
+      conn = c; clearTimeout(openTimer); closeAttempts(c); lastErr = '';
+      connectMs = Date.now() - since;
+      setTimeout(function () { measureRoute(c); }, 300);
+    }
     if (c !== conn) return;
     if (m.t === 'estado') { cam = m.s; camMsg = m.msg || ''; liveSince = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0; render(); }
     if (m.t === 'error') { cam = 'error'; camMsg = m.msg || ''; render(); }
@@ -327,6 +368,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   setInterval(function () {
     var d = new Date(); $('now').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes());
     if (cam === 'en-vivo' && liveSince) $('elapsed').textContent = mmss(Date.now() - liveSince);
+    if (cam === 'buscando') render();
   }, 1000);
   // Si salís de la página, apaga la cámara para cuidar la batería del 5s.
   // iOS corta las conexiones de las pestañas en segundo plano: al volver, arranca de cero.

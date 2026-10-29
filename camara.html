@@ -146,6 +146,29 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
       video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 10, max: 12 } }
     });
   }
+  // Safari de iOS 12 se olvida del permiso si la cámara se apaga del todo.
+  // Por eso queda "en reposo": abierta a 1 cuadro por segundo, sin mostrarse ni enviarse.
+  var warm = null;
+  function warmAlive() {
+    var t = warm && warm.getVideoTracks()[0];
+    return !!(t && t.readyState === 'live');
+  }
+  function setRate(fps) {
+    if (!warmAlive()) return Promise.resolve();
+    try {
+      // En reposo solo se pide "lo más cerca de 1 por segundo" (sin máximo), para que el 5s no lo rechace.
+      var fr = fps <= 1 ? { ideal: 1 } : { ideal: fps, max: fps + 2 };
+      var r = warm.getVideoTracks()[0].applyConstraints({ width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: fr });
+      return (r && r.then) ? r.catch(function () {}) : Promise.resolve();
+    } catch (e) { return Promise.resolve(); }
+  }
+  function keepWarm(s) {
+    if (warm && warm !== s) stopStream(warm);
+    warm = s;
+    var t = s.getVideoTracks()[0];
+    if (t) t.onended = function () { if (warm === s) warm = null; };
+    setRate(1);
+  }
   function stopStream(s) {
     if (!s) return;
     s.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
@@ -171,15 +194,17 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   };
   $('ready').onclick = function () {
     $('preview').srcObject = null;
-    stopStream(stream); stream = null;
+    if (stream) keepWarm(stream);
+    stream = null;
     goStandby();
   };
   $('tapGo').onclick = function () {
-    getCam().then(function (s) { stopStream(s); goStandby(); })
+    getCam().then(function (s) { keepWarm(s); goStandby(); })
       .catch(function (e) { $('tapErr').textContent = camError(e); });
   };
   $('reset').onclick = function () {
     turnOff();
+    if (warm) { stopStream(warm); warm = null; }
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
     try { localStorage.removeItem(KEY); } catch (e) {}
     $('code').value = '';
@@ -199,7 +224,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     var shown = (!netOk && (s === 'espera')) ? 'sin-red' : s;
     $('state').setAttribute('data-s', shown);
     $('stateText').textContent = LABELS[shown] || shown;
-    $('sub').textContent = msg || '';
+    $('sub').textContent = msg || (s === 'espera' && netOk ? (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso') : '');
     if (s === 'en-vivo' && !liveSince) liveSince = Date.now();
     if (s !== 'en-vivo') liveSince = 0;
     send({ t: 'estado', s: s, ms: liveSince ? Date.now() - liveSince : 0, msg: msg || '' });
@@ -272,10 +297,21 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     if (state === 'en-vivo' && stream) { if (!call) placeCall(); return; }
     if (state === 'encendiendo' || state === 'permiso') return;
     setState('encendiendo');
+    if (warmAlive()) {
+      // Sin pedir permiso: solo sube de 1 a 10 cuadros por segundo.
+      setRate(10).then(function () {
+        if (!conn || state !== 'encendiendo') { setRate(1); return; }
+        stream = warm;
+        placeCall();
+      });
+      return;
+    }
     var waiting = setTimeout(function () { if (state === 'encendiendo') setState('permiso', 'Safari está pidiendo permiso'); }, 10000);
     getCam().then(function (s) {
       clearTimeout(waiting);
-      if (!conn || (state !== 'encendiendo' && state !== 'permiso')) { stopStream(s); return; }
+      keepWarm(s);
+      if (!conn || (state !== 'encendiendo' && state !== 'permiso')) return;
+      setRate(10);
       stream = s;
       placeCall();
     }).catch(function (e) {
@@ -309,7 +345,8 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   }
   function endCall() {
     if (call) { var c = call; call = null; try { c.close(); } catch (e) {} }
-    stopStream(stream); stream = null;
+    if (stream && stream === warm) setRate(1); else stopStream(stream);
+    stream = null;
   }
   function turnOff() {
     endCall();
