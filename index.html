@@ -342,6 +342,17 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     else { send({ t: 'off' }); cam = 'espera'; }
     render();
   };
+  // Safari pausa el video al salir de la pantalla completa (la cruz) y queda congelado: lo retomo solo.
+  function resumeVideo() {
+    var v = $('video');
+    if (!v.srcObject || document.hidden || cam !== 'en-vivo') return;
+    v.muted = true;
+    var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
+  }
+  ['webkitendfullscreen', 'webkitfullscreenchange', 'fullscreenchange', 'pause'].forEach(function (ev) {
+    var target = (ev === 'webkitfullscreenchange' || ev === 'fullscreenchange') ? document : $('video');
+    target.addEventListener(ev, function () { setTimeout(resumeVideo, 150); setTimeout(resumeVideo, 800); });
+  });
   // De costado, tocar el video alterna entre llenar la pantalla y verlo entero.
   $('video').onclick = function () { $('monitor').classList.toggle('entera'); };
   $('full').onclick = function () {
