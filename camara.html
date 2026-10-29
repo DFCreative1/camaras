@@ -143,7 +143,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   function getCam() {
     return navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15, max: 20 } }
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 10, max: 12 } }
     });
   }
   function stopStream(s) {
@@ -283,6 +283,20 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
       setState(e && e.name === 'NotAllowedError' ? 'permiso' : 'error', camError(e));
     });
   }
+  function capBitrate(c, bps) {
+    try {
+      var pc = c && c.peerConnection;
+      if (!pc || !pc.getSenders) return;
+      pc.getSenders().forEach(function (snd) {
+        if (!snd.track || snd.track.kind !== 'video' || !snd.getParameters || !snd.setParameters) return;
+        var prm = snd.getParameters();
+        if (!prm.encodings || !prm.encodings.length) prm.encodings = [{}];
+        prm.encodings[0].maxBitrate = bps;
+        var r = snd.setParameters(prm);
+        if (r && r.catch) r.catch(function () {});
+      });
+    } catch (e) {}
+  }
   function placeCall() {
     if (!conn || !stream || !peer) return;
     var c = peer.call(conn.peer, stream);
@@ -290,6 +304,8 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     c.on('close', function () { if (call === c) { call = null; turnOff(); } });
     c.on('error', function () { if (call === c) { call = null; turnOff(); } });
     setState('en-vivo');
+    // 10 cuadros por segundo y tope de 0,7 Mbps: menos trabajo para el 5s y menos batería.
+    setTimeout(function () { capBitrate(c, 700000); }, 2500);
   }
   function endCall() {
     if (call) { var c = call; call = null; try { c.close(); } catch (e) {} }
