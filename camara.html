@@ -95,17 +95,18 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
-  <button id="reset" type="button"><span id="canalTxt"></span>v10.4 · Cambiar código</button>
+  <button id="reset" type="button"><span id="canalTxt"></span>v11 · Cambiar código</button>
 </div>
 
 <div id="spacer"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.4.7/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@4.3.7/dist/mqtt.min.js"></script>
 <script>
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v10.4';
+  var VER = 'v11';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -178,70 +179,69 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     return o;
   }
 
-  // ---------- Avisos instantáneos (ntfy.sh, gratis y sin cuenta) ----------
-  // El 5s avisa "estoy en espera" y recibe "encendé" por acá, sin depender de que los teléfonos se encuentren.
-  var NTFY = param('ntfy') || 'https://ntfy.sh';
-  function topic(code, kind) { code = norm(code); return 'cventana-' + hash(code, 1) + hash(code, 7) + hash(code, 11) + '-' + kind; }
+  // ---------- Avisos (MQTT: sin cupo diario, guarda el último estado y avisa si el 5s se desconecta) ----------
+  // Se usan dos servidores públicos a la vez; si uno falla, el otro sigue. Los mensajes repetidos se descartan.
+  var BROKERS = param('mqtt') ? param('mqtt').split(',') : ['wss://broker.hivemq.com:8884/mqtt', 'wss://broker.emqx.io:8084/mqtt', 'wss://test.mosquitto.org:8081/mqtt'];
   // Mayúsculas, minúsculas y espacios no importan (el iPhone suele poner mayúscula sola a la primera letra).
   function norm(c) { return String(c || '').replace(/\s+/g, '').toLowerCase(); }
   function firma(code) { return hash(norm(code) + '|ventana', 21); }
   // 4 letras que salen del código: si en los dos teléfonos no coinciden, los códigos son distintos.
   function canal(code) { var h = hash(norm(code) + '|canal', 31).toUpperCase().replace(/[^A-Z0-9]/g, ''); return (h + 'XXXX').slice(0, 4); }
-  // cb(ok, estado): avisa si el servicio aceptó el aviso (429 = demasiados pedidos desde la misma red).
-  function publish(code, kind, obj, cb) {
-    try {
-      var x = new XMLHttpRequest();
-      x.open('POST', NTFY + '/' + topic(code, kind), true);
-      x.timeout = 15000;
-      x.onload = function () { if (cb) cb(x.status >= 200 && x.status < 300, x.status); };
-      x.onerror = x.ontimeout = function () { if (cb) cb(false, 0); };
-      x.send(JSON.stringify(obj));
-    } catch (e) { if (cb) cb(false, 0); }
+  function topic(code, kind) { var c = norm(code); return 'cventana/' + hash(c, 1) + hash(c, 7) + hash(c, 11) + '/' + kind; }
+  // Órdenes firmadas con el código y la hora: quien lea el canal no puede inventarlas ni repetirlas.
+  function orden(code, t, v) {
+    var at = Date.now();
+    return { t: t, v: v || '', at: at, id: rid(), k: hmacSha1B64(norm(code), t + '|' + (v || '') + '|' + at) };
   }
-  // Consulta directa del último aviso guardado, por si la conexión en vivo quedó muerta sin avisar.
-  function pollLast(code, kind, since, onMsg) {
-    try {
-      var x = new XMLHttpRequest();
-      x.open('GET', NTFY + '/' + topic(code, kind) + '/json?poll=1&since=' + since + '&nocache=' + Date.now(), true);
-      x.timeout = 15000;
-      x.onload = function () {
-        if (x.status !== 200) return;
-        var lines = (x.responseText || '').split('\n'), i, d;
-        for (i = 0; i < lines.length; i++) {
-          if (!lines[i]) continue;
-          try { d = JSON.parse(lines[i]); if (d.event === 'message') onMsg(JSON.parse(d.message), (d.time || 0) * 1000); } catch (e) {}
-        }
-      };
-      x.send();
-    } catch (e) {}
+  function ordenValida(code, m) {
+    if (!m || !m.at || !m.k) return false;
+    if (Math.abs(Date.now() - m.at) > 120000) return false; // más de 2 min: vieja o reloj muy corrido
+    return m.k === hmacSha1B64(norm(code), m.t + '|' + (m.v || '') + '|' + m.at);
   }
-  // Suscripción con reconexión: si no llega nada (ni el "keepalive" de ntfy) en 100 s, se reabre.
-  function subscribe(code, kind, since, onMsg, onAlive) {
-    var es = null, last = 0, closed = false, first = true;
-    function open() {
-      if (closed) return;
-      try { if (es) es.close(); } catch (e) {}
-      var q = since ? '?since=' + since : ''; // al reabrir también trae el último aviso
-      first = false;
-      es = new EventSource(NTFY + '/' + topic(code, kind) + '/sse' + q);
-      var alive = function () { last = Date.now(); onAlive(true); };
-      es.onopen = alive;
-      es.addEventListener('keepalive', alive);
-      es.addEventListener('open', alive);
-      es.onmessage = function (ev) {
-        alive();
-        try {
-          var d = JSON.parse(ev.data);
-          if (d.event && d.event !== 'message') return;
-          onMsg(JSON.parse(d.message), (d.time || 0) * 1000);
-        } catch (e) {}
-      };
-      es.onerror = function () { onAlive(false); };
-      last = Date.now();
+  function rid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+
+  // opts: { will: {kind, obj}, subs: {kind: fn(obj)}, onConnect: fn(i), onStatus: fn(nConectados, total) }
+  function Bus(code, opts) {
+    var clients = [], seen = [], closed = false;
+    function status() {
+      var n = 0; clients.forEach(function (c) { if (c && c.connected) n++; });
+      if (opts.onStatus) opts.onStatus(n, clients.length);
     }
-    var timer = setInterval(function () { if (Date.now() - last > 70000) open(); }, 10000);
-    open();
-    return { reopen: open, close: function () { closed = true; clearInterval(timer); try { es.close(); } catch (e) {} } };
+    function onMessage(t, payload) {
+      var kind = t.split('/').pop(), m;
+      try { m = JSON.parse(payload.toString()); } catch (e) { return; }
+      if (m.id) { if (seen.indexOf(m.id) >= 0) return; seen.push(m.id); if (seen.length > 80) seen.shift(); }
+      if (opts.subs && opts.subs[kind]) opts.subs[kind](m);
+    }
+    BROKERS.forEach(function (url, i) {
+      var o = { clientId: 'cv_' + rid(), keepalive: 20, reconnectPeriod: 3000, connectTimeout: 10000, clean: true, resubscribe: true };
+      if (opts.will) o.will = { topic: topic(code, opts.will.kind), payload: JSON.stringify(opts.will.obj), qos: 1, retain: true };
+      var c;
+      try { c = mqtt.connect(url, o); } catch (e) { clients.push(null); return; }
+      clients.push(c);
+      c.on('connect', function () {
+        if (closed) return;
+        var subs = Object.keys(opts.subs || {}).map(function (k) { return topic(code, k); });
+        if (subs.length) c.subscribe(subs, { qos: 1 });
+        status();
+        if (opts.onConnect) opts.onConnect(i);
+      });
+      c.on('message', onMessage);
+      ['close', 'offline', 'error', 'reconnect'].forEach(function (ev) { c.on(ev, function () { status(); }); });
+    });
+    status();
+    return {
+      // Publica en todos los servidores conectados. retain = el servidor lo guarda como "último estado".
+      send: function (kind, obj, retain) {
+        obj.id = obj.id || rid(); obj.at = obj.at || Date.now();
+        var p = JSON.stringify(obj), n = 0;
+        clients.forEach(function (c) { if (c && c.connected) { n++; try { c.publish(topic(code, kind), p, { qos: 1, retain: !!retain }); } catch (e) {} } });
+        return n;
+      },
+      connected: function () { var n = 0; clients.forEach(function (c) { if (c && c.connected) n++; }); return n; },
+      total: function () { return clients.length; },
+      close: function () { closed = true; clients.forEach(function (c) { try { if (c) c.end(true); } catch (e) {} }); }
+    };
   }
 
   var code = '';
@@ -299,7 +299,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   $('reset').onclick = function () {
     turnOff();
     if (warm) { stopStream(warm); warm = null; }
-    if (sub) { sub.close(); sub = null; }
+    if (bus) { bus.send('vis', { t: 'estado', s: 'offline' }, true); bus.close(); bus = null; }
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
     try { localStorage.removeItem(KEY); } catch (e) {}
     $('code').value = ''; document.body.className = ''; window.scrollTo(0, 0);
@@ -307,7 +307,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   };
 
   // ---------- Estado ----------
-  var state = 'espera', liveSince = 0, msgOk = false, peerOk = false, lastPing = 0, viewer = '', note = '';
+  var state = 'espera', liveSince = 0, msgN = 0, peerOk = false, lastPing = 0, viewer = '', note = '';
   var LABELS = { 'espera': 'En espera', 'encendiendo': 'Encendiendo', 'en-vivo': 'Transmitiendo', 'permiso': 'Tocá para permitir', 'error': 'Error' };
   function setState(s, msg) {
     state = s; note = msg || '';
@@ -316,41 +316,39 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     paint(); heartbeat();
   }
   function paint() {
-    var shown = (!msgOk || !peerOk) && state === 'espera' ? 'sin-red' : state;
+    var ok = msgN > 0 && peerOk;
+    var shown = !ok && state === 'espera' ? 'sin-red' : state;
     $('state').setAttribute('data-s', shown);
     $('stateText').textContent = shown === 'sin-red' ? 'Conectando' : (LABELS[state] || state);
-    var aviso = !pubOk ? 'No pude avisar (' + (pubStatus === 429 ? 'demasiados pedidos' : pubStatus ? 'error ' + pubStatus : 'sin internet') + '), reintento'
-      : (pubAt ? 'aviso ' + pad(new Date(pubAt).getHours()) + ':' + pad(new Date(pubAt).getMinutes()) : '');
-    $('sub').textContent = note || (state === 'espera' && msgOk && peerOk ? (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso') + (aviso ? ' · ' + aviso : '') : aviso);
+    var red = 'avisos ' + msgN + '/' + (bus ? bus.total() : 0) + ' · video ' + (peerOk ? 'ok' : '…');
+    $('sub').textContent = note || (state === 'espera' && ok ? (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso') + ' · ' + red : red);
   }
   function tick() { var d = new Date(); $('clock').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()); }
-  // Latido: cada 30 s (y en cada cambio) avisa en qué estado está. Tu iPhone lo ve al instante al abrir la página.
+  // Estado "guardado" en el servidor: tu iPhone lo recibe apenas abre. Se manda en cada cambio y cada 10 min.
+  // Si el 5s se desconecta, el servidor publica solo "offline" (último deseo de la conexión).
   var lastBeat = 0;
   function heartbeat() {
-    if (!code || $('standby').hidden) return;
+    if (!code || $('standby').hidden || !bus) return;
     lastBeat = Date.now();
-    publish(code, 'vis', { t: 'estado', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive(), video: peerOk, msg: note, v: VER }, function (ok, st) {
-      pubOk = ok; pubStatus = st;
-      if (ok) pubAt = Date.now();
-      else setTimeout(heartbeat, st === 429 ? 20000 : 8000); // reintento si no salió
-      paint();
-    });
+    bus.send('vis', { t: 'estado', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive(), video: peerOk, msg: note, v: VER }, true);
   }
-  var pubOk = true, pubStatus = 0, pubAt = 0;
 
   // ---------- Órdenes desde tu iPhone ----------
-  var sub = null;
+  var bus = null;
+  function onOrden(m) {
+    if (!ordenValida(code, m)) return;
+    if (m.t === 'hola') { heartbeat(); return; }
+    if (m.t === 'on') { lastPing = Date.now(); viewer = m.v || viewer; turnOn(); return; }
+    if (m.t === 'ping') { lastPing = Date.now(); if (m.v && state === 'espera') { viewer = m.v; turnOn(); } return; }
+    if (m.t === 'off') { if (!m.v || m.v === viewer) turnOff(); }
+  }
   function listen() {
-    if (sub) sub.close();
-    sub = subscribe(code, 'cam', '', function (m) {
-      if (!m || m.k !== firma(code)) return;
-      if (m.t === 'hola') { heartbeat(); return; }
-      if (m.t === 'on') { lastPing = Date.now(); viewer = m.v || viewer; turnOn(); return; }
-      if (m.t === 'ping') { lastPing = Date.now(); if (m.v && state === 'espera') { viewer = m.v; turnOn(); } return; }
-      if (m.t === 'off') { if (!m.v || m.v === viewer) turnOff(); }
-    }, function (ok) {
-      var was = msgOk; msgOk = ok; paint();
-      if (ok && !was) heartbeat();
+    if (bus) bus.close();
+    bus = Bus(code, {
+      will: { kind: 'vis', obj: { t: 'estado', s: 'offline' } },
+      subs: { cam: onOrden },
+      onConnect: function () { heartbeat(); },
+      onStatus: function (n) { msgN = n; paint(); }
     });
   }
 
@@ -393,7 +391,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
           var s = pc && (pc.iceConnectionState || '');
           if (call !== c) return;
           if (s === 'connected' || s === 'completed') { clearTimeout(callTimer); setState('en-vivo'); capBitrate(c, 1500000); }
-          if (s === 'failed') turnOff('No hubo camino para el video');
+          if (s === 'failed' || s === 'closed') turnOff(s === 'failed' ? 'No hubo camino para el video' : '');
         };
         if (pc) pc.addEventListener('iceconnectionstatechange', check);
         c.on('close', function () { if (call === c) { call = null; turnOff(); } });
@@ -447,10 +445,10 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   }
 
   setInterval(tick, 10000);
-  setInterval(function () { if (!$('standby').hidden && Date.now() - lastBeat > 29000) heartbeat(); }, 5000);
+  setInterval(function () { if (!$('standby').hidden && Date.now() - lastBeat > 10 * 60 * 1000) heartbeat(); }, 30000);
   // Si tu iPhone deja de dar señales 30 s, la cámara vuelve a reposo sola.
   setInterval(function () {
-    if ((state === 'en-vivo' || state === 'encendiendo' || state === 'permiso') && Date.now() - lastPing > 45000) turnOff();
+    if ((state === 'en-vivo' || state === 'encendiendo' || state === 'permiso') && Date.now() - lastPing > 30000) turnOff();
   }, 5000);
   // Vigilante del video: reconecta si se cayó; cada 6 h sin uso se renueva (credenciales del relé frescas).
   var peerBorn = Date.now();
@@ -462,13 +460,13 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   }, 20000);
   document.addEventListener('visibilitychange', function () {
     if (document.hidden || $('standby').hidden) return;
-    if (sub) sub.reopen();
+    if (!bus || bus.connected() === 0) listen();
     if (!peer || peer.disconnected || peer.destroyed) startPeer();
     heartbeat();
   });
 
   // ---------- Arranque ----------
-  if (typeof Peer === 'undefined') { show('setup'); $('err').textContent = 'No cargó la conexión. Revisá internet y recargá.'; return; }
+  if (typeof Peer === 'undefined' || typeof mqtt === 'undefined') { show('setup'); $('err').textContent = 'No cargó la conexión. Revisá internet y recargá.'; return; }
   if (code) show('tap'); else show('setup');
 })();
 </script>
