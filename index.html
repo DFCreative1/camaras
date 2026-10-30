@@ -141,7 +141,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v10.1';
+  var VER = 'v10.2';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -219,11 +219,32 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   var NTFY = param('ntfy') || 'https://ntfy.sh';
   function topic(code, kind) { return 'cventana-' + hash(code, 1) + hash(code, 7) + hash(code, 11) + '-' + kind; }
   function firma(code) { return hash(code + '|ventana', 21); }
-  function publish(code, kind, obj) {
+  // cb(ok, estado): avisa si el servicio aceptó el aviso (429 = demasiados pedidos desde la misma red).
+  function publish(code, kind, obj, cb) {
     try {
       var x = new XMLHttpRequest();
       x.open('POST', NTFY + '/' + topic(code, kind), true);
+      x.timeout = 15000;
+      x.onload = function () { if (cb) cb(x.status >= 200 && x.status < 300, x.status); };
+      x.onerror = x.ontimeout = function () { if (cb) cb(false, 0); };
       x.send(JSON.stringify(obj));
+    } catch (e) { if (cb) cb(false, 0); }
+  }
+  // Consulta directa del último aviso guardado, por si la conexión en vivo quedó muerta sin avisar.
+  function pollLast(code, kind, since, onMsg) {
+    try {
+      var x = new XMLHttpRequest();
+      x.open('GET', NTFY + '/' + topic(code, kind) + '/json?poll=1&since=' + since + '&nocache=' + Date.now(), true);
+      x.timeout = 15000;
+      x.onload = function () {
+        if (x.status !== 200) return;
+        var lines = (x.responseText || '').split('\n'), i, d;
+        for (i = 0; i < lines.length; i++) {
+          if (!lines[i]) continue;
+          try { d = JSON.parse(lines[i]); if (d.event === 'message') onMsg(JSON.parse(d.message), (d.time || 0) * 1000); } catch (e) {}
+        }
+      };
+      x.send();
     } catch (e) {}
   }
   // Suscripción con reconexión: si no llega nada (ni el "keepalive" de ntfy) en 100 s, se reabre.
@@ -232,7 +253,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     function open() {
       if (closed) return;
       try { if (es) es.close(); } catch (e) {}
-      var q = (first && since) ? '?since=' + since : '';
+      var q = since ? '?since=' + since : ''; // al reabrir también trae el último aviso
       first = false;
       es = new EventSource(NTFY + '/' + topic(code, kind) + '/sse' + q);
       var alive = function () { last = Date.now(); onAlive(true); };
@@ -250,7 +271,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       es.onerror = function () { onAlive(false); };
       last = Date.now();
     }
-    var timer = setInterval(function () { if (Date.now() - last > 100000) open(); }, 10000);
+    var timer = setInterval(function () { if (Date.now() - last > 70000) open(); }, 10000);
     open();
     return { reopen: open, close: function () { closed = true; clearInterval(timer); try { es.close(); } catch (e) {} } };
   }
@@ -321,7 +342,11 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   function listen() {
     if (sub) sub.close();
     // since=3m: al abrir, trae el último aviso guardado y muestra el estado al instante.
-    sub = subscribe(code, 'vis', '3m', function (m, t) {
+    sub = subscribe(code, 'vis', '2m', onEstado, function (ok) { msgOk = ok; render(); });
+    pollLast(code, 'vis', '2m', onEstado);
+    publish(code, 'cam', { t: 'hola', k: firma(code) });
+  }
+  function onEstado(m, t) {
       if (!m || m.t !== 'estado') return;
       var when = t || Date.now();
       if (when < lastSeen) return;
@@ -330,9 +355,9 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       liveSince = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0;
       if (cam === 'espera' && want && camMsg) { lastErr = camMsg; }
       render();
-    }, function (ok) { msgOk = ok; render(); });
-    publish(code, 'cam', { t: 'hola', k: firma(code) });
   }
+  // Respaldo: cada 20 s (y al volver a la app) consulta el último aviso directamente.
+  setInterval(function () { if (code && !$('view').hidden && !document.hidden) pollLast(code, 'vis', '2m', onEstado); }, 20000);
 
   // ---------- Video ----------
   var peer = null, call = null, restartTimer = null, noVideoTimer = null;
@@ -397,7 +422,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   }
   $('toggle').onclick = function () { setWant(!want); };
   // Mientras mirás, una señal cada 10 s. Si se corta, el 5s vuelve a reposo solo a los 30 s.
-  setInterval(function () { if (want && peer && peer.open) publish(code, 'cam', { t: 'ping', v: peer.id, k: firma(code) }); }, 10000);
+  setInterval(function () { if (want && peer && peer.open) publish(code, 'cam', { t: 'ping', v: peer.id, k: firma(code) }); }, 15000);
 
   // Safari pausa el video al salir de la pantalla completa (la cruz): lo retomo solo.
   function resumeVideo() {
@@ -440,6 +465,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) { hiddenAt = Date.now(); if (want) setWant(false); return; }
     if (!code || $('view').hidden) return;
+    pollLast(code, 'vis', '2m', onEstado);
     if (Date.now() - hiddenAt > 3000) { if (sub) sub.reopen(); publish(code, 'cam', { t: 'hola', k: firma(code) }); }
     if (!peer || peer.destroyed || peer.disconnected) startPeer();
   });

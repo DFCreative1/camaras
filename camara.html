@@ -95,7 +95,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
-  <button id="reset" type="button">v10 · Cambiar código</button>
+  <button id="reset" type="button">v10.2 · Cambiar código</button>
 </div>
 
 <div id="spacer"></div>
@@ -105,7 +105,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v10';
+  var VER = 'v10.2';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -183,11 +183,32 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   var NTFY = param('ntfy') || 'https://ntfy.sh';
   function topic(code, kind) { return 'cventana-' + hash(code, 1) + hash(code, 7) + hash(code, 11) + '-' + kind; }
   function firma(code) { return hash(code + '|ventana', 21); }
-  function publish(code, kind, obj) {
+  // cb(ok, estado): avisa si el servicio aceptó el aviso (429 = demasiados pedidos desde la misma red).
+  function publish(code, kind, obj, cb) {
     try {
       var x = new XMLHttpRequest();
       x.open('POST', NTFY + '/' + topic(code, kind), true);
+      x.timeout = 15000;
+      x.onload = function () { if (cb) cb(x.status >= 200 && x.status < 300, x.status); };
+      x.onerror = x.ontimeout = function () { if (cb) cb(false, 0); };
       x.send(JSON.stringify(obj));
+    } catch (e) { if (cb) cb(false, 0); }
+  }
+  // Consulta directa del último aviso guardado, por si la conexión en vivo quedó muerta sin avisar.
+  function pollLast(code, kind, since, onMsg) {
+    try {
+      var x = new XMLHttpRequest();
+      x.open('GET', NTFY + '/' + topic(code, kind) + '/json?poll=1&since=' + since + '&nocache=' + Date.now(), true);
+      x.timeout = 15000;
+      x.onload = function () {
+        if (x.status !== 200) return;
+        var lines = (x.responseText || '').split('\n'), i, d;
+        for (i = 0; i < lines.length; i++) {
+          if (!lines[i]) continue;
+          try { d = JSON.parse(lines[i]); if (d.event === 'message') onMsg(JSON.parse(d.message), (d.time || 0) * 1000); } catch (e) {}
+        }
+      };
+      x.send();
     } catch (e) {}
   }
   // Suscripción con reconexión: si no llega nada (ni el "keepalive" de ntfy) en 100 s, se reabre.
@@ -196,7 +217,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     function open() {
       if (closed) return;
       try { if (es) es.close(); } catch (e) {}
-      var q = (first && since) ? '?since=' + since : '';
+      var q = since ? '?since=' + since : ''; // al reabrir también trae el último aviso
       first = false;
       es = new EventSource(NTFY + '/' + topic(code, kind) + '/sse' + q);
       var alive = function () { last = Date.now(); onAlive(true); };
@@ -214,7 +235,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
       es.onerror = function () { onAlive(false); };
       last = Date.now();
     }
-    var timer = setInterval(function () { if (Date.now() - last > 100000) open(); }, 10000);
+    var timer = setInterval(function () { if (Date.now() - last > 70000) open(); }, 10000);
     open();
     return { reopen: open, close: function () { closed = true; clearInterval(timer); try { es.close(); } catch (e) {} } };
   }
@@ -259,7 +280,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     if (c.length < 6) { $('err').textContent = 'El código tiene que tener al menos 6 caracteres.'; return; }
     code = c; try { localStorage.setItem(KEY, code); } catch (e) {}
     $('err').textContent = '';
-    getCam().then(function (s) { preview = s; var v = $('preview'); v.srcObject = s; v.play(); show('aim'); })
+    getCam().then(function (s) { preview = s; var v = $('preview'); v.srcObject = s; var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); show('aim'); })
       .catch(function (e) { $('err').textContent = camError(e); });
   };
   $('ready').onclick = function () {
@@ -294,7 +315,9 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     var shown = (!msgOk || !peerOk) && state === 'espera' ? 'sin-red' : state;
     $('state').setAttribute('data-s', shown);
     $('stateText').textContent = shown === 'sin-red' ? 'Conectando' : (LABELS[state] || state);
-    $('sub').textContent = note || (state === 'espera' && msgOk && peerOk ? (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso') : '');
+    var aviso = !pubOk ? 'No pude avisar (' + (pubStatus === 429 ? 'demasiados pedidos' : pubStatus ? 'error ' + pubStatus : 'sin internet') + '), reintento'
+      : (pubAt ? 'aviso ' + pad(new Date(pubAt).getHours()) + ':' + pad(new Date(pubAt).getMinutes()) : '');
+    $('sub').textContent = note || (state === 'espera' && msgOk && peerOk ? (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso') + (aviso ? ' · ' + aviso : '') : aviso);
   }
   function tick() { var d = new Date(); $('clock').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()); }
   // Latido: cada 30 s (y en cada cambio) avisa en qué estado está. Tu iPhone lo ve al instante al abrir la página.
@@ -302,8 +325,14 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   function heartbeat() {
     if (!code || $('standby').hidden) return;
     lastBeat = Date.now();
-    publish(code, 'vis', { t: 'estado', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive(), video: peerOk, msg: note, v: VER });
+    publish(code, 'vis', { t: 'estado', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive(), video: peerOk, msg: note, v: VER }, function (ok, st) {
+      pubOk = ok; pubStatus = st;
+      if (ok) pubAt = Date.now();
+      else setTimeout(heartbeat, st === 429 ? 20000 : 8000); // reintento si no salió
+      paint();
+    });
   }
+  var pubOk = true, pubStatus = 0, pubAt = 0;
 
   // ---------- Órdenes desde tu iPhone ----------
   var sub = null;
@@ -416,7 +445,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   setInterval(function () { if (!$('standby').hidden && Date.now() - lastBeat > 29000) heartbeat(); }, 5000);
   // Si tu iPhone deja de dar señales 30 s, la cámara vuelve a reposo sola.
   setInterval(function () {
-    if ((state === 'en-vivo' || state === 'encendiendo' || state === 'permiso') && Date.now() - lastPing > 30000) turnOff();
+    if ((state === 'en-vivo' || state === 'encendiendo' || state === 'permiso') && Date.now() - lastPing > 45000) turnOff();
   }, 5000);
   // Vigilante del video: reconecta si se cayó; cada 6 h sin uso se renueva (credenciales del relé frescas).
   var peerBorn = Date.now();
