@@ -141,7 +141,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v10.2';
+  var VER = 'v10.4';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -217,8 +217,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   // ---------- Avisos instantáneos (ntfy.sh, gratis y sin cuenta) ----------
   // El 5s avisa "estoy en espera" y recibe "encendé" por acá, sin depender de que los teléfonos se encuentren.
   var NTFY = param('ntfy') || 'https://ntfy.sh';
-  function topic(code, kind) { return 'cventana-' + hash(code, 1) + hash(code, 7) + hash(code, 11) + '-' + kind; }
-  function firma(code) { return hash(code + '|ventana', 21); }
+  function topic(code, kind) { code = norm(code); return 'cventana-' + hash(code, 1) + hash(code, 7) + hash(code, 11) + '-' + kind; }
+  // Mayúsculas, minúsculas y espacios no importan (el iPhone suele poner mayúscula sola a la primera letra).
+  function norm(c) { return String(c || '').replace(/\s+/g, '').toLowerCase(); }
+  function firma(code) { return hash(norm(code) + '|ventana', 21); }
+  // 4 letras que salen del código: si en los dos teléfonos no coinciden, los códigos son distintos.
+  function canal(code) { var h = hash(norm(code) + '|canal', 31).toUpperCase().replace(/[^A-Z0-9]/g, ''); return (h + 'XXXX').slice(0, 4); }
   // cb(ok, estado): avisa si el servicio aceptó el aviso (429 = demasiados pedidos desde la misma red).
   function publish(code, kind, obj, cb) {
     try {
@@ -231,21 +235,27 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     } catch (e) { if (cb) cb(false, 0); }
   }
   // Consulta directa del último aviso guardado, por si la conexión en vivo quedó muerta sin avisar.
+  var pollInfo = '';
   function pollLast(code, kind, since, onMsg) {
     try {
       var x = new XMLHttpRequest();
       x.open('GET', NTFY + '/' + topic(code, kind) + '/json?poll=1&since=' + since + '&nocache=' + Date.now(), true);
       x.timeout = 15000;
       x.onload = function () {
+        pollInfo = x.status === 200 ? 'ok' : (x.status === 429 ? 'rechazada por exceso' : 'error ' + x.status);
         if (x.status !== 200) return;
-        var lines = (x.responseText || '').split('\n'), i, d;
+        var lines = (x.responseText || '').split('\n'), i, d, n = 0;
+        for (i = 0; i < lines.length; i++) if (lines[i]) n++;
+        if (!n) pollInfo = 'ok, sin avisos recientes';
         for (i = 0; i < lines.length; i++) {
           if (!lines[i]) continue;
           try { d = JSON.parse(lines[i]); if (d.event === 'message') onMsg(JSON.parse(d.message), (d.time || 0) * 1000); } catch (e) {}
         }
       };
+      x.onerror = function () { pollInfo = 'sin conexión con el servicio'; };
+      x.ontimeout = function () { pollInfo = 'sin respuesta del servicio'; };
       x.send();
-    } catch (e) {}
+    } catch (e) { pollInfo = 'falló'; }
   }
   // Suscripción con reconexión: si no llega nada (ni el "keepalive" de ntfy) en 100 s, se reabre.
   function subscribe(code, kind, since, onMsg, onAlive) {
@@ -324,6 +334,10 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     $('idleText').innerHTML = '';
     var s = document.createElement('strong');
     s.textContent = st === 'sin-senal' ? t[0] + hhmm(lastSeen) : t[0];
+    if (st === 'buscando' && Date.now() - bootAt > 20000) {
+      t = ['No llega ningún aviso del 5s', 'Compará el canal: acá es ' + canal(code) + '. En el 5s, abajo de todo, tiene que decir "Canal ' + canal(code) + '". Si es distinto, los códigos no son iguales: tocá Cambiar código y escribilo de nuevo.'];
+      s.textContent = t[0];
+    }
     $('idleText').appendChild(s);
     $('idleText').appendChild(document.createTextNode(camMsg && (st === 'espera' || st === 'error') ? camMsg : t[1]));
     var btn = $('toggle');
@@ -331,7 +345,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     btn.className = want ? 'main off' : 'main';
     btn.disabled = !want && (st === 'buscando' || st === 'sin-senal' || !peer || !peer.open);
     var ago = lastSeen ? Math.round((Date.now() - lastSeen) / 1000) : -1;
-    $('diag').textContent = VER + ' · avisos ' + (msgOk ? 'ok' : 'conectando') +
+    $('diag').textContent = VER + ' · canal ' + canal(code) + ' · avisos ' + (msgOk ? 'ok' : 'conectando') +
+      (pollInfo ? ' · consulta ' + pollInfo : '') +
       ' · video ' + (peer && peer.open ? 'listo' : 'preparando') +
       (ago >= 0 ? ' · último aviso hace ' + ago + ' s' : '') +
       (route ? ' · ' + route : '') + (lastErr ? ' · ' + lastErr : '');
@@ -477,7 +492,9 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     else if (peer.disconnected) { try { peer.reconnect(); } catch (e) { startPeer(); } }
   }, 10000);
 
+  var bootAt = Date.now();
   function boot() {
+    bootAt = Date.now();
     keepCodeInUrl();
     $('setup').hidden = true; $('view').hidden = false;
     lastSeen = 0; cam = 'buscando'; render();

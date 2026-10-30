@@ -95,7 +95,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
-  <button id="reset" type="button">v10.2 · Cambiar código</button>
+  <button id="reset" type="button"><span id="canalTxt"></span>v10.4 · Cambiar código</button>
 </div>
 
 <div id="spacer"></div>
@@ -105,7 +105,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v10.2';
+  var VER = 'v10.4';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -181,8 +181,12 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   // ---------- Avisos instantáneos (ntfy.sh, gratis y sin cuenta) ----------
   // El 5s avisa "estoy en espera" y recibe "encendé" por acá, sin depender de que los teléfonos se encuentren.
   var NTFY = param('ntfy') || 'https://ntfy.sh';
-  function topic(code, kind) { return 'cventana-' + hash(code, 1) + hash(code, 7) + hash(code, 11) + '-' + kind; }
-  function firma(code) { return hash(code + '|ventana', 21); }
+  function topic(code, kind) { code = norm(code); return 'cventana-' + hash(code, 1) + hash(code, 7) + hash(code, 11) + '-' + kind; }
+  // Mayúsculas, minúsculas y espacios no importan (el iPhone suele poner mayúscula sola a la primera letra).
+  function norm(c) { return String(c || '').replace(/\s+/g, '').toLowerCase(); }
+  function firma(code) { return hash(norm(code) + '|ventana', 21); }
+  // 4 letras que salen del código: si en los dos teléfonos no coinciden, los códigos son distintos.
+  function canal(code) { var h = hash(norm(code) + '|canal', 31).toUpperCase().replace(/[^A-Z0-9]/g, ''); return (h + 'XXXX').slice(0, 4); }
   // cb(ok, estado): avisa si el servicio aceptó el aviso (429 = demasiados pedidos desde la misma red).
   function publish(code, kind, obj, cb) {
     try {
@@ -436,6 +440,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   }
   window.addEventListener('scroll', checkHint);
   function goStandby() {
+    $('canalTxt').textContent = 'Canal ' + canal(code) + ' · ';
     document.body.className = 'standby';
     checkHint(); show('standby'); tick();
     listen(); startPeer(); setState('espera');
