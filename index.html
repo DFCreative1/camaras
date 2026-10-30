@@ -33,6 +33,17 @@ body{padding-top:max(14px, env(safe-area-inset-top));padding-bottom:max(18px, en
 .app{max-width:620px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
 
 header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-top:6px}
+/* Selector de cámaras */
+.cams{display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;margin:0 -2px;padding:2px}
+.cams::-webkit-scrollbar{display:none}
+.cam{flex:none;display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:12px;border:1px solid var(--line);
+  background:var(--surface);color:var(--muted);font:inherit;font-size:14px;font-weight:600;cursor:pointer;white-space:nowrap}
+.cam i{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.cam[data-s="espera"] i{background:var(--ok)}
+.cam[data-s="en-vivo"] i,.cam[data-s="encendiendo"] i{background:var(--live)}
+.cam[data-s="permiso"] i,.cam[data-s="error"] i{background:var(--warn)}
+.cam[data-s="sin-senal"] i{background:transparent;box-shadow:0 0 0 1.5px var(--muted) inset}
+.cam[aria-pressed="true"]{color:var(--text);border-color:var(--glass);box-shadow:0 0 0 1px var(--glass) inset}
 .brand{display:flex;align-items:center;gap:10px;min-width:0}
 .brand svg{flex:none}
 .brand h1{margin:0;font-family:var(--display);font-size:20px;font-weight:650;letter-spacing:-.01em;white-space:nowrap}
@@ -119,10 +130,11 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     </div>
     <span class="pill" id="pill" data-s="sin-red"><i></i><span id="pillText">Conectando</span></span>
   </header>
+  <nav class="cams" id="cams" aria-label="Cámaras" hidden></nav>
 
   <section class="setup" id="setup" hidden>
     <h2>Código de la cámara</h2>
-    <p>El mismo que pusiste en el iPhone 5s. Queda guardado en este teléfono.</p>
+    <p>El mismo que pusiste en tus cámaras. Queda guardado en este teléfono.</p>
     <input id="code" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Código">
     <button class="main" id="save" type="button">Conectar</button>
     <div class="err" id="err"></div>
@@ -158,7 +170,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v11.2';
+  var VER = 'v13';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -231,49 +243,61 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     return o;
   }
 
-  // ---------- Avisos (MQTT: sin cupo diario, guarda el último estado y avisa si el 5s se desconecta) ----------
-  // Se usan dos servidores públicos a la vez; si uno falla, el otro sigue. Los mensajes repetidos se descartan.
+  // ---------- Avisos (MQTT: sin cupo diario, guarda el último estado y avisa si una cámara se desconecta) ----------
+  // Tres servidores públicos a la vez; si uno falla, siguen los otros. Los mensajes repetidos se descartan.
   var BROKERS = param('mqtt') ? param('mqtt').split(',') : ['wss://broker.hivemq.com:8884/mqtt', 'wss://broker.emqx.io:8084/mqtt', 'wss://test.mosquitto.org:8081/mqtt'];
   // Mayúsculas, minúsculas y espacios no importan (el iPhone suele poner mayúscula sola a la primera letra).
   function norm(c) { return String(c || '').replace(/\s+/g, '').toLowerCase(); }
-  function firma(code) { return hash(norm(code) + '|ventana', 21); }
-  // 4 letras que salen del código: si en los dos teléfonos no coinciden, los códigos son distintos.
+  // 4 letras que salen del código: si en los teléfonos no coinciden, los códigos son distintos.
   function canal(code) { var h = hash(norm(code) + '|canal', 31).toUpperCase().replace(/[^A-Z0-9]/g, ''); return (h + 'XXXX').slice(0, 4); }
-  function topic(code, kind) { var c = norm(code); return 'cventana/' + hash(c, 1) + hash(c, 7) + hash(c, 11) + '/' + kind; }
-  // Órdenes firmadas con el código y la hora: quien lea el canal no puede inventarlas ni repetirlas.
-  function orden(code, t, v) {
-    var at = Date.now();
-    return { t: t, v: v || '', at: at, id: rid(), k: hmacSha1B64(norm(code), t + '|' + (v || '') + '|' + at) };
+  // Cada cámara tiene su identificador, que sale de su nombre ("Living" → living).
+  function camSlug(name) {
+    var s = String(name || '').toLowerCase();
+    var from = 'áàäâãéèëêíìïîóòöôõúùüûñç', to = 'aaaaaeeeeiiiiooooouuuunc', out = '', i, k;
+    for (i = 0; i < s.length; i++) { k = from.indexOf(s[i]); out += k >= 0 ? to[k] : s[i]; }
+    out = out.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+    return out || 'camara';
   }
-  function ordenValida(code, m) {
-    if (!m || !m.at || !m.k) return false;
+  function base(code) { var c = norm(code); return 'cventana/' + hash(c, 1) + hash(c, 7) + hash(c, 11) + '/'; }
+  function topic(code, kind, cam) { return base(code) + (cam || 'camara') + '/' + kind; }
+  // Órdenes firmadas con el código, la cámara y la hora: quien lea el canal no puede inventarlas ni repetirlas.
+  function orden(code, t, v, cam) {
+    var at = Date.now();
+    return { t: t, v: v || '', c: cam, at: at, id: rid(), k: hmacSha1B64(norm(code), t + '|' + (v || '') + '|' + cam + '|' + at) };
+  }
+  function ordenValida(code, m, cam) {
+    if (!m || !m.at || !m.k || m.c !== cam) return false;
     if (Math.abs(Date.now() - m.at) > 120000) return false; // más de 2 min: vieja o reloj muy corrido
-    return m.k === hmacSha1B64(norm(code), m.t + '|' + (m.v || '') + '|' + m.at);
+    return m.k === hmacSha1B64(norm(code), m.t + '|' + (m.v || '') + '|' + cam + '|' + m.at);
   }
   function rid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
 
-  // opts: { will: {kind, obj}, subs: {kind: fn(obj)}, onConnect: fn(i), onStatus: fn(nConectados, total) }
+  // opts: { cam: id propio (cámara) o '+' (visor: todas), keepalive, will: {kind, obj},
+  //         subs: {kind: fn(obj o null si se borró, camId)}, onConnect, onStatus: fn(nConectados, total) }
   function Bus(code, opts) {
-    var clients = [], seen = [], closed = false;
+    var clients = [], seen = [], closed = false, subCam = opts.cam || 'camara';
     function status() {
       var n = 0; clients.forEach(function (c) { if (c && c.connected) n++; });
       if (opts.onStatus) opts.onStatus(n, clients.length);
     }
     function onMessage(t, payload) {
-      var kind = t.split('/').pop(), m;
-      try { m = JSON.parse(payload.toString()); } catch (e) { return; }
-      if (m.id) { if (seen.indexOf(m.id) >= 0) return; seen.push(m.id); if (seen.length > 80) seen.shift(); }
-      if (opts.subs && opts.subs[kind]) opts.subs[kind](m);
+      var parts = t.split('/'), kind = parts.pop(), cam = parts.pop(), txt = payload.toString(), m = null;
+      if (!opts.subs || !opts.subs[kind]) return;
+      if (txt) {
+        try { m = JSON.parse(txt); } catch (e) { return; }
+        if (m.id) { var key = cam + m.id; if (seen.indexOf(key) >= 0) return; seen.push(key); if (seen.length > 120) seen.shift(); }
+      }
+      opts.subs[kind](m, cam);
     }
     BROKERS.forEach(function (url, i) {
-      var o = { clientId: 'cv_' + rid(), keepalive: 20, reconnectPeriod: 3000, connectTimeout: 10000, clean: true, resubscribe: true };
-      if (opts.will) o.will = { topic: topic(code, opts.will.kind), payload: JSON.stringify(opts.will.obj), qos: 1, retain: true };
+      var o = { clientId: 'cv_' + rid(), keepalive: opts.keepalive || 20, reconnectPeriod: 3000, connectTimeout: 10000, clean: true, resubscribe: true };
+      if (opts.will) o.will = { topic: topic(code, opts.will.kind, subCam), payload: JSON.stringify(opts.will.obj), qos: 1, retain: true };
       var c;
       try { c = mqtt.connect(url, o); } catch (e) { clients.push(null); return; }
       clients.push(c);
       c.on('connect', function () {
         if (closed) return;
-        var subs = Object.keys(opts.subs || {}).map(function (k) { return topic(code, k); });
+        var subs = Object.keys(opts.subs || {}).map(function (k) { return topic(code, k, subCam); });
         if (subs.length) c.subscribe(subs, { qos: 1 });
         status();
         if (opts.onConnect) opts.onConnect(i);
@@ -284,11 +308,16 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     status();
     return {
       // Publica en todos los servidores conectados. retain = el servidor lo guarda como "último estado".
-      send: function (kind, obj, retain) {
+      send: function (kind, obj, retain, cam) {
         obj.id = obj.id || rid(); obj.at = obj.at || Date.now();
-        var p = JSON.stringify(obj), n = 0;
-        clients.forEach(function (c) { if (c && c.connected) { n++; try { c.publish(topic(code, kind), p, { qos: 1, retain: !!retain }); } catch (e) {} } });
+        var p = JSON.stringify(obj), n = 0, tp = topic(code, kind, cam || subCam);
+        clients.forEach(function (c) { if (c && c.connected) { n++; try { c.publish(tp, p, { qos: 1, retain: !!retain }); } catch (e) {} } });
         return n;
+      },
+      // Borra el estado guardado de una cámara (por ejemplo al cambiarle el nombre).
+      clear: function (kind, cam) {
+        var tp = topic(code, kind, cam || subCam);
+        clients.forEach(function (c) { if (c && c.connected) { try { c.publish(tp, '', { qos: 1, retain: true }); } catch (e) {} } });
       },
       connected: function () { var n = 0; clients.forEach(function (c) { if (c && c.connected) n++; }); return n; },
       total: function () { return clients.length; },
@@ -313,15 +342,55 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   // ---------- Estado ----------
   // cam: lo que informa el 5s en su último aviso. Si el aviso es viejo, se muestra "sin señal".
   var cam = 'buscando', camMsg = '', camLista = true, lastSeen = 0, lastOnline = 0, liveSince = 0, msgN = 0, bootAt = Date.now();
+  // Todas las cámaras de este código: id → { n: nombre, s: estado, msg, lista, seen, online, ms }
+  var cams = {}, sel = '';
+  try { sel = localStorage.getItem(KEY + '.sel') || ''; } catch (e) {}
+  function camName(id) { return (cams[id] && cams[id].n) || 'la cámara'; }
+  function camEff(c) {
+    if (!c) return 'buscando';
+    if (c.s === 'offline' || Date.now() - c.online > 25 * 60 * 1000) return 'sin-senal';
+    return c.s;
+  }
+  function visibleCams() {
+    return Object.keys(cams).filter(function (id) { var c = cams[id]; return c.s !== 'offline' || Date.now() - (c.online || c.seen) < 7 * 86400000 || id === sel; })
+      .sort(function (a, b) { return camName(a).localeCompare(camName(b)); });
+  }
+  function syncSel() {
+    var c = cams[sel];
+    if (!c) { cam = 'buscando'; camMsg = ''; lastSeen = 0; lastOnline = 0; liveSince = 0; return; }
+    cam = c.s; camMsg = c.msg; camLista = c.lista; lastSeen = c.seen; lastOnline = c.online; liveSince = c.s === 'en-vivo' ? c.live : 0;
+  }
+  function renderCams() {
+    var ids = visibleCams(), nav = $('cams');
+    nav.hidden = ids.length === 0;
+    var key = ids.map(function (id) { return id + ':' + camEff(cams[id]) + ':' + (id === sel); }).join('|');
+    if (nav.getAttribute('data-k') === key) return;
+    nav.setAttribute('data-k', key); nav.innerHTML = '';
+    ids.forEach(function (id) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'cam'; b.setAttribute('data-s', camEff(cams[id])); b.setAttribute('aria-pressed', String(id === sel));
+      b.appendChild(document.createElement('i')); b.appendChild(document.createTextNode(camName(id)));
+      b.onclick = function () { selectCam(id); };
+      nav.appendChild(b);
+    });
+  }
+  function selectCam(id) {
+    if (id === sel) return;
+    var wasOn = want;
+    if (want) setWant(false);
+    sel = id; try { localStorage.setItem(KEY + '.sel', sel); } catch (e) {}
+    syncSel(); loadRot(); zReset(); render();
+    if (wasOn && camEff(cams[sel]) !== 'sin-senal') setWant(true);
+  }
   var want = false, wantSince = 0, hasVideo = false, route = '', lastErr = '';
   var PILL = { 'buscando': 'Buscando', 'sin-senal': 'Sin señal', 'espera': 'En espera', 'encendiendo': 'Encendiendo',
     'en-vivo': 'En vivo', 'permiso': 'Falta permiso', 'error': 'Atención' };
   var IDLE = {
-    'buscando': ['Conectando con el 5s', 'Un instante.'],
-    'sin-senal': ['El 5s está desconectado', 'Puede haberse quedado sin batería, sin wifi o con Safari cerrado. Cuando vuelva, aparece solo.'],
+    'buscando': ['Buscando tus cámaras', 'Un instante.'],
+    'sin-senal': ['Desconectada', 'Puede haberse quedado sin batería, sin wifi o con Safari cerrado. Cuando vuelva, aparece sola.'],
     'espera': ['La cámara está en espera', 'Tocá Encender para verla en vivo.'],
-    'encendiendo': ['Encendiendo la cámara', 'El 5s ya recibió la orden. El video llega en unos segundos.'],
-    'permiso': ['El 5s está pidiendo permiso', 'Safari quiere confirmar el uso de la cámara: hay que tocar Permitir en el 5s.'],
+    'encendiendo': ['Encendiendo la cámara', 'Ya recibió la orden. El video llega en unos segundos.'],
+    'permiso': ['Está pidiendo permiso', 'Safari quiere confirmar el uso de la cámara: hay que tocar Permitir en ese iPhone.'],
     'error': ['La cámara avisó un problema', ''],
     'en-vivo': ['Conectando el video', 'La cámara ya está transmitiendo. Un instante.']
   };
@@ -344,13 +413,15 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     $('idle').hidden = live;
     var cls = live ? 'live' + (maxi ? ' max' : '') : '';
     if (document.body.className !== cls) { document.body.className = cls; zReset(); setTimeout(applyRot, 50); }
+    renderCams();
     var t = IDLE[st] || IDLE['espera'];
     $('idleText').innerHTML = '';
     var s = document.createElement('strong');
-    s.textContent = t[0] + (st === 'sin-senal' && lastOnline ? ' desde las ' + hhmm(lastOnline) : '');
+    s.textContent = (sel && cams[sel] ? camName(sel) + ': ' : '') + t[0].charAt(0).toLowerCase() + t[0].slice(1) + (st === 'sin-senal' && lastOnline ? ' desde las ' + hhmm(lastOnline) : '');
+    if (!(sel && cams[sel])) s.textContent = t[0];
     if (st === 'buscando' && Date.now() - bootAt > 15000) {
-      s.textContent = msgN ? 'El 5s nunca se conectó a este canal' : 'Sin conexión con los servidores de avisos';
-      t = [s.textContent, msgN ? 'Compará el canal: acá es ' + canal(code) + '. En el 5s, abajo de todo, tiene que decir "Canal ' + canal(code) + '". Si coincide, recargá la página del 5s y tocá Activar.' : 'Revisá que este iPhone tenga internet.'];
+      s.textContent = msgN ? 'Ninguna cámara se conectó a este canal' : 'Sin conexión con los servidores de avisos';
+      t = [s.textContent, msgN ? 'Compará el canal: acá es ' + canal(code) + '. En cada cámara, abajo de todo, tiene que decir "Canal ' + canal(code) + '". Si coincide, recargá la página de la cámara y tocá Activar.' : 'Revisá que este iPhone tenga internet.'];
     }
     $('idleText').appendChild(s);
     $('idleText').appendChild(document.createTextNode(camMsg && (st === 'espera' || st === 'error') ? camMsg : t[1]));
@@ -360,31 +431,41 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     btn.disabled = !want && (st === 'buscando' || st === 'sin-senal' || !peer || !peer.open);
     $('diag').textContent = VER + ' · canal ' + canal(code) + ' · avisos ' + msgN + '/' + (bus ? bus.total() : 0) +
       ' · video ' + (peer && peer.open ? 'listo' : 'preparando') +
-      (lastSeen ? ' · 5s ' + (cam === 'offline' ? 'desconectado' : 'visto ' + hhmm(lastOnline)) : '') +
+      (lastSeen ? ' · ' + camName(sel) + ' ' + (cam === 'offline' ? 'desconectada' : 'vista ' + hhmm(lastOnline)) : '') +
       (route ? ' · ' + route : '') + (lastErr ? ' · ' + lastErr : '');
   }
 
   // ---------- Avisos del 5s ----------
   // Al conectarse, el servidor entrega enseguida el último estado guardado del 5s.
   var bus = null;
-  function onEstado(m) {
-    if (!m || m.t !== 'estado') return;
-    lastSeen = Date.now();
-    cam = m.s; camMsg = m.msg || ''; camLista = m.lista !== false;
-    if (m.s !== 'offline') lastOnline = Math.min(m.at || Date.now(), Date.now());
-    liveSince = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0;
-    if (cam === 'espera' && want && camMsg) { lastErr = camMsg; }
+  function onEstado(m, id) {
+    if (!m) { delete cams[id]; if (id === sel) { sel = ''; } }
+    else {
+      if (m.t !== 'estado') return;
+      var c = cams[id] || (cams[id] = { n: '', online: 0 });
+      c.n = m.n || c.n || id; c.s = m.s; c.msg = m.msg || ''; c.lista = m.lista !== false; c.seen = Date.now();
+      if (m.s !== 'offline') c.online = Math.min(m.at || Date.now(), Date.now());
+      c.live = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0;
+    }
+    if (!sel || !cams[sel]) {
+      var ids = visibleCams(), on = ids.filter(function (k) { return camEff(cams[k]) !== 'sin-senal'; });
+      sel = on[0] || ids[0] || '';
+      if (sel) { try { localStorage.setItem(KEY + '.sel', sel); } catch (e) {} loadRot(); }
+    }
+    syncSel();
+    if (id === sel && cam === 'espera' && want && camMsg) { lastErr = camMsg; }
     render();
   }
   function listen() {
     if (bus) bus.close();
     bus = Bus(code, {
+      cam: '+', // escucha a todas las cámaras de este código
       subs: { vis: onEstado },
-      onConnect: function () { bus.send('cam', orden(code, 'hola')); if (want) sendOn(); },
+      onConnect: function () { if (want) sendOn(); },
       onStatus: function (n) { msgN = n; render(); }
     });
   }
-  function publish(c, kind, obj) { if (bus) bus.send(kind, obj); }
+  function publish(c, kind, obj) { if (bus && sel) bus.send(kind, obj, false, sel); }
 
   // ---------- Video ----------
   var peer = null, call = null, restartTimer = null, noVideoTimer = null;
@@ -430,7 +511,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   }
 
   // ---------- Encender / apagar ----------
-  function sendOn() { if (peer && peer.open) publish(code, 'cam', orden(code, 'on', peer.id)); }
+  function sendOn() { if (peer && peer.open) publish(code, 'cam', orden(code, 'on', peer.id, sel)); }
   function setWant(on) {
     want = on; lastErr = '';
     if (on) {
@@ -439,7 +520,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       noVideoTimer = setTimeout(function () { if (want && !hasVideo) { lastErr = 'el video tarda: reintentando'; render(); sendOn(); } }, 15000);
     } else {
       clearTimeout(noVideoTimer);
-      publish(code, 'cam', orden(code, 'off', peer && peer.id));
+      publish(code, 'cam', orden(code, 'off', peer && peer.id, sel));
       if (call) { try { call.close(); } catch (e) {} call = null; }
       hasVideo = false; route = '';
     }
@@ -447,7 +528,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   }
   $('toggle').onclick = function () { setWant(!want); };
   // Mientras mirás, una señal cada 10 s. Si se corta, el 5s vuelve a reposo solo a los 30 s.
-  setInterval(function () { if (want && peer && peer.open) publish(code, 'cam', orden(code, 'ping', peer.id)); }, 10000);
+  setInterval(function () { if (want && peer && peer.open) publish(code, 'cam', orden(code, 'ping', peer.id, sel)); }, 10000);
 
   // Safari pausa el video al salir de la pantalla completa (la cruz): lo retomo solo.
   function resumeVideo() {
@@ -533,7 +614,11 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   $('zchip').onclick = function (e) { e.stopPropagation(); zReset(); };
   // Giro de la imagen: si el 5s manda el video de costado, cada toque gira 90°. Queda guardado en este teléfono.
   var rot = 0;
-  try { rot = (parseInt(localStorage.getItem(KEY + '.giro'), 10) || 0) % 360; } catch (e) {}
+  function loadRot() {
+    rot = 0;
+    try { var g = localStorage.getItem(KEY + '.giro.' + sel); if (g === null) g = localStorage.getItem(KEY + '.giro'); rot = (parseInt(g, 10) || 0) % 360; } catch (e) {}
+    applyRot();
+  }
   function applyRot() {
     var v = $('video'), mon = $('monitor'), vw = v.videoWidth, vh = v.videoHeight, side = rot % 180 !== 0;
     if (vw && vh) mon.style.aspectRatio = side ? (vh + ' / ' + vw) : (vw + ' / ' + vh);
@@ -546,7 +631,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   $('girar').onclick = function (e) {
     e.stopPropagation();
     rot = (rot + 90) % 360; zReset();
-    try { localStorage.setItem(KEY + '.giro', String(rot)); } catch (e2) {}
+    try { localStorage.setItem(KEY + '.giro.' + sel, String(rot)); } catch (e2) {}
     applyRot(); setTimeout(applyRot, 50);
   };
   window.addEventListener('resize', function () { setTimeout(function () { applyRot(); zApply(); }, 60); });
@@ -562,7 +647,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
     try { localStorage.removeItem(KEY); } catch (e) {}
-    lastSeen = 0; cam = 'buscando';
+    lastSeen = 0; cam = 'buscando'; cams = {}; sel = '';
     $('code').value = ''; $('view').hidden = true; $('setup').hidden = false;
   };
   $('save').onclick = function () {
@@ -586,7 +671,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     if (Date.now() - hiddenAt > 3000) listen(); // iOS corta las conexiones en segundo plano: se rehacen al volver
     if (!peer || peer.destroyed || peer.disconnected) startPeer();
   });
-  window.addEventListener('pagehide', function () { if (want) publish(code, 'cam', orden(code, 'off', peer && peer.id)); });
+  window.addEventListener('pagehide', function () { if (want) publish(code, 'cam', orden(code, 'off', peer && peer.id, sel)); });
   window.addEventListener('online', function () { if (code && !$('view').hidden) { listen(); startPeer(); } });
   setInterval(function () {
     if (!code || $('view').hidden || document.hidden) return;
@@ -597,7 +682,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   function boot() {
     keepCodeInUrl(); bootAt = Date.now();
     $('setup').hidden = true; $('view').hidden = false;
-    lastSeen = 0; lastOnline = 0; cam = 'buscando'; render();
+    lastSeen = 0; lastOnline = 0; cam = 'buscando'; cams = {}; render();
     listen(); startPeer();
   }
   if (typeof Peer === 'undefined' || typeof mqtt === 'undefined') { $('setup').hidden = false; $('err').textContent = 'No cargó la conexión. Revisá internet y recargá.'; return; }

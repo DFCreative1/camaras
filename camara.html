@@ -69,8 +69,9 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
 
 <div class="screen" id="setup" hidden>
   <h1>Cámara Ventana</h1>
-  <p class="lead">Este iPhone va a ser la cámara. Elegí un código de al menos 6 letras o números. Es el mismo que vas a poner en el iPhone con el que mirás.</p>
+  <p class="lead">Este iPhone va a ser una cámara. Poné el mismo código en todas tus cámaras y en el iPhone con el que mirás, y a cada cámara un nombre distinto.</p>
   <input id="code" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Código">
+  <input id="nombre" type="text" autocomplete="off" autocorrect="off" spellcheck="false" maxlength="24" placeholder="Nombre (ej: Ventana, Living)" style="margin-top:10px">
   <button id="go" type="button">Activar cámara</button>
   <p class="err" id="err"></p>
 </div>
@@ -95,7 +96,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
-  <button id="reset" type="button"><span id="canalTxt"></span>v11 · Cambiar código</button>
+  <button id="reset" type="button"><span id="canalTxt"></span>v13 · Cambiar código</button>
 </div>
 
 <div id="spacer"></div>
@@ -106,7 +107,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v11';
+  var VER = 'v13';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -179,49 +180,61 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     return o;
   }
 
-  // ---------- Avisos (MQTT: sin cupo diario, guarda el último estado y avisa si el 5s se desconecta) ----------
-  // Se usan dos servidores públicos a la vez; si uno falla, el otro sigue. Los mensajes repetidos se descartan.
+  // ---------- Avisos (MQTT: sin cupo diario, guarda el último estado y avisa si una cámara se desconecta) ----------
+  // Tres servidores públicos a la vez; si uno falla, siguen los otros. Los mensajes repetidos se descartan.
   var BROKERS = param('mqtt') ? param('mqtt').split(',') : ['wss://broker.hivemq.com:8884/mqtt', 'wss://broker.emqx.io:8084/mqtt', 'wss://test.mosquitto.org:8081/mqtt'];
   // Mayúsculas, minúsculas y espacios no importan (el iPhone suele poner mayúscula sola a la primera letra).
   function norm(c) { return String(c || '').replace(/\s+/g, '').toLowerCase(); }
-  function firma(code) { return hash(norm(code) + '|ventana', 21); }
-  // 4 letras que salen del código: si en los dos teléfonos no coinciden, los códigos son distintos.
+  // 4 letras que salen del código: si en los teléfonos no coinciden, los códigos son distintos.
   function canal(code) { var h = hash(norm(code) + '|canal', 31).toUpperCase().replace(/[^A-Z0-9]/g, ''); return (h + 'XXXX').slice(0, 4); }
-  function topic(code, kind) { var c = norm(code); return 'cventana/' + hash(c, 1) + hash(c, 7) + hash(c, 11) + '/' + kind; }
-  // Órdenes firmadas con el código y la hora: quien lea el canal no puede inventarlas ni repetirlas.
-  function orden(code, t, v) {
-    var at = Date.now();
-    return { t: t, v: v || '', at: at, id: rid(), k: hmacSha1B64(norm(code), t + '|' + (v || '') + '|' + at) };
+  // Cada cámara tiene su identificador, que sale de su nombre ("Living" → living).
+  function camSlug(name) {
+    var s = String(name || '').toLowerCase();
+    var from = 'áàäâãéèëêíìïîóòöôõúùüûñç', to = 'aaaaaeeeeiiiiooooouuuunc', out = '', i, k;
+    for (i = 0; i < s.length; i++) { k = from.indexOf(s[i]); out += k >= 0 ? to[k] : s[i]; }
+    out = out.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+    return out || 'camara';
   }
-  function ordenValida(code, m) {
-    if (!m || !m.at || !m.k) return false;
+  function base(code) { var c = norm(code); return 'cventana/' + hash(c, 1) + hash(c, 7) + hash(c, 11) + '/'; }
+  function topic(code, kind, cam) { return base(code) + (cam || 'camara') + '/' + kind; }
+  // Órdenes firmadas con el código, la cámara y la hora: quien lea el canal no puede inventarlas ni repetirlas.
+  function orden(code, t, v, cam) {
+    var at = Date.now();
+    return { t: t, v: v || '', c: cam, at: at, id: rid(), k: hmacSha1B64(norm(code), t + '|' + (v || '') + '|' + cam + '|' + at) };
+  }
+  function ordenValida(code, m, cam) {
+    if (!m || !m.at || !m.k || m.c !== cam) return false;
     if (Math.abs(Date.now() - m.at) > 120000) return false; // más de 2 min: vieja o reloj muy corrido
-    return m.k === hmacSha1B64(norm(code), m.t + '|' + (m.v || '') + '|' + m.at);
+    return m.k === hmacSha1B64(norm(code), m.t + '|' + (m.v || '') + '|' + cam + '|' + m.at);
   }
   function rid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
 
-  // opts: { will: {kind, obj}, subs: {kind: fn(obj)}, onConnect: fn(i), onStatus: fn(nConectados, total) }
+  // opts: { cam: id propio (cámara) o '+' (visor: todas), keepalive, will: {kind, obj},
+  //         subs: {kind: fn(obj o null si se borró, camId)}, onConnect, onStatus: fn(nConectados, total) }
   function Bus(code, opts) {
-    var clients = [], seen = [], closed = false;
+    var clients = [], seen = [], closed = false, subCam = opts.cam || 'camara';
     function status() {
       var n = 0; clients.forEach(function (c) { if (c && c.connected) n++; });
       if (opts.onStatus) opts.onStatus(n, clients.length);
     }
     function onMessage(t, payload) {
-      var kind = t.split('/').pop(), m;
-      try { m = JSON.parse(payload.toString()); } catch (e) { return; }
-      if (m.id) { if (seen.indexOf(m.id) >= 0) return; seen.push(m.id); if (seen.length > 80) seen.shift(); }
-      if (opts.subs && opts.subs[kind]) opts.subs[kind](m);
+      var parts = t.split('/'), kind = parts.pop(), cam = parts.pop(), txt = payload.toString(), m = null;
+      if (!opts.subs || !opts.subs[kind]) return;
+      if (txt) {
+        try { m = JSON.parse(txt); } catch (e) { return; }
+        if (m.id) { var key = cam + m.id; if (seen.indexOf(key) >= 0) return; seen.push(key); if (seen.length > 120) seen.shift(); }
+      }
+      opts.subs[kind](m, cam);
     }
     BROKERS.forEach(function (url, i) {
-      var o = { clientId: 'cv_' + rid(), keepalive: 20, reconnectPeriod: 3000, connectTimeout: 10000, clean: true, resubscribe: true };
-      if (opts.will) o.will = { topic: topic(code, opts.will.kind), payload: JSON.stringify(opts.will.obj), qos: 1, retain: true };
+      var o = { clientId: 'cv_' + rid(), keepalive: opts.keepalive || 20, reconnectPeriod: 3000, connectTimeout: 10000, clean: true, resubscribe: true };
+      if (opts.will) o.will = { topic: topic(code, opts.will.kind, subCam), payload: JSON.stringify(opts.will.obj), qos: 1, retain: true };
       var c;
       try { c = mqtt.connect(url, o); } catch (e) { clients.push(null); return; }
       clients.push(c);
       c.on('connect', function () {
         if (closed) return;
-        var subs = Object.keys(opts.subs || {}).map(function (k) { return topic(code, k); });
+        var subs = Object.keys(opts.subs || {}).map(function (k) { return topic(code, k, subCam); });
         if (subs.length) c.subscribe(subs, { qos: 1 });
         status();
         if (opts.onConnect) opts.onConnect(i);
@@ -232,11 +245,16 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     status();
     return {
       // Publica en todos los servidores conectados. retain = el servidor lo guarda como "último estado".
-      send: function (kind, obj, retain) {
+      send: function (kind, obj, retain, cam) {
         obj.id = obj.id || rid(); obj.at = obj.at || Date.now();
-        var p = JSON.stringify(obj), n = 0;
-        clients.forEach(function (c) { if (c && c.connected) { n++; try { c.publish(topic(code, kind), p, { qos: 1, retain: !!retain }); } catch (e) {} } });
+        var p = JSON.stringify(obj), n = 0, tp = topic(code, kind, cam || subCam);
+        clients.forEach(function (c) { if (c && c.connected) { n++; try { c.publish(tp, p, { qos: 1, retain: !!retain }); } catch (e) {} } });
         return n;
+      },
+      // Borra el estado guardado de una cámara (por ejemplo al cambiarle el nombre).
+      clear: function (kind, cam) {
+        var tp = topic(code, kind, cam || subCam);
+        clients.forEach(function (c) { if (c && c.connected) { try { c.publish(tp, '', { qos: 1, retain: true }); } catch (e) {} } });
       },
       connected: function () { var n = 0; clients.forEach(function (c) { if (c && c.connected) n++; }); return n; },
       total: function () { return clients.length; },
@@ -244,8 +262,9 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     };
   }
 
-  var code = '';
-  try { code = localStorage.getItem(KEY) || ''; } catch (e) {}
+  var code = '', nombre = '', CAM = 'camara';
+  try { code = localStorage.getItem(KEY) || ''; nombre = localStorage.getItem(KEY + '.nombre') || ''; } catch (e) {}
+  CAM = camSlug(nombre || 'Cámara');
   function show(id) { ['setup', 'tap', 'aim', 'standby'].forEach(function (s) { $(s).hidden = s !== id; }); }
 
   // ---------- Cámara ----------
@@ -264,12 +283,28 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     try { var r = warm.getVideoTracks()[0].applyConstraints(c); return (r && r.then) ? r.catch(function () {}) : Promise.resolve(); }
     catch (e) { return Promise.resolve(); }
   }
+  // Prueba opcional (?ahorro=1): además de bajar la cámara al mínimo, la "pausa" en reposo.
+  var AHORRO = param('ahorro') === '1';
+  function pauseCam(on) { var t = warm && warm.getVideoTracks()[0]; if (t && AHORRO) t.enabled = !on; }
+  // En iPhones nuevos (iOS 16 o más) el permiso puede quedar fijo para esta página ("Permitir").
+  // Si está fijo, en espera la cámara se apaga del todo y se prende al pedir video, sin preguntar.
+  var permOk = false;
+  function checkPerm() {
+    try {
+      if (!navigator.permissions || !navigator.permissions.query) return;
+      navigator.permissions.query({ name: 'camera' }).then(function (r) {
+        var upd = function () { permOk = r.state === 'granted'; if (permOk && state === 'espera') releaseWarm(); paint(); };
+        r.onchange = upd; upd();
+      }).catch(function () {});
+    } catch (e) {}
+  }
+  function releaseWarm() { if (warm) { var w = warm; warm = null; stopStream(w); } }
   function keepWarm(s) {
     if (warm && warm !== s) stopStream(warm);
     warm = s;
     var t = s.getVideoTracks()[0];
     if (t) t.onended = function () { if (warm === s) { warm = null; heartbeat(); } };
-    applyMode(REST);
+    applyMode(REST); pauseCam(true);
   }
   function camError(e) {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return 'Este Safari no permite usar la cámara.';
@@ -282,7 +317,10 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   $('go').onclick = function () {
     var c = ($('code').value || '').replace(/\s+/g, '');
     if (c.length < 6) { $('err').textContent = 'El código tiene que tener al menos 6 caracteres.'; return; }
-    code = c; try { localStorage.setItem(KEY, code); } catch (e) {}
+    var n = ($('nombre').value || '').replace(/^\s+|\s+$/g, '');
+    if (!n) { $('err').textContent = 'Poné un nombre para esta cámara (por ejemplo Ventana o Living).'; return; }
+    code = c; nombre = n; CAM = camSlug(n);
+    try { localStorage.setItem(KEY, code); localStorage.setItem(KEY + '.nombre', nombre); } catch (e) {}
     $('err').textContent = '';
     getCam().then(function (s) { preview = s; var v = $('preview'); v.srcObject = s; var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); show('aim'); })
       .catch(function (e) { $('err').textContent = camError(e); });
@@ -299,7 +337,8 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   $('reset').onclick = function () {
     turnOff();
     if (warm) { stopStream(warm); warm = null; }
-    if (bus) { bus.send('vis', { t: 'estado', s: 'offline' }, true); bus.close(); bus = null; }
+    if (bus) { bus.clear('vis'); var b0 = bus; bus = null; setTimeout(function () { b0.close(); }, 800); }
+    $('nombre').value = nombre;
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
     try { localStorage.removeItem(KEY); } catch (e) {}
     $('code').value = ''; document.body.className = ''; window.scrollTo(0, 0);
@@ -316,12 +355,14 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     paint(); heartbeat();
   }
   function paint() {
-    var ok = msgN > 0 && peerOk;
+    var ok = msgN > 0;
     var shown = !ok && state === 'espera' ? 'sin-red' : state;
     $('state').setAttribute('data-s', shown);
     $('stateText').textContent = shown === 'sin-red' ? 'Conectando' : (LABELS[state] || state);
-    var red = 'avisos ' + msgN + '/' + (bus ? bus.total() : 0) + ' · video ' + (peerOk ? 'ok' : '…');
-    $('sub').textContent = note || (state === 'espera' && ok ? (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso') + ' · ' + red : red);
+    var red = 'avisos ' + msgN + '/' + (bus ? bus.total() : 0) + (AHORRO ? ' · ahorro de cámara' : '') + (state !== 'espera' ? ' · video ' + (peerOk ? 'ok' : '…') : '');
+    var lista = permOk ? 'Cámara apagada hasta que la pidas' : (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso');
+    var tip = (!permOk && navigator.permissions) ? ' · Para ahorrar: aA → Ajustes del sitio web → Cámara → Permitir' : '';
+    $('sub').textContent = note || (state === 'espera' && ok ? lista + ' · ' + red + tip : red);
   }
   function tick() { var d = new Date(); $('clock').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()); }
   // Estado "guardado" en el servidor: tu iPhone lo recibe apenas abre. Se manda en cada cambio y cada 10 min.
@@ -330,13 +371,13 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   function heartbeat() {
     if (!code || $('standby').hidden || !bus) return;
     lastBeat = Date.now();
-    bus.send('vis', { t: 'estado', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive(), video: peerOk, msg: note, v: VER }, true);
+    bus.send('vis', { t: 'estado', n: nombre || 'Cámara', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive() || permOk, video: peerOk, msg: note, v: VER }, true);
   }
 
   // ---------- Órdenes desde tu iPhone ----------
   var bus = null;
   function onOrden(m) {
-    if (!ordenValida(code, m)) return;
+    if (!ordenValida(code, m, CAM)) return;
     if (m.t === 'hola') { heartbeat(); return; }
     if (m.t === 'on') { lastPing = Date.now(); viewer = m.v || viewer; turnOn(); return; }
     if (m.t === 'ping') { lastPing = Date.now(); if (m.v && state === 'espera') { viewer = m.v; turnOn(); } return; }
@@ -345,15 +386,30 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   function listen() {
     if (bus) bus.close();
     bus = Bus(code, {
-      will: { kind: 'vis', obj: { t: 'estado', s: 'offline' } },
+      cam: CAM,
+      keepalive: 120, // antes 20 s: el wifi se despertaba cada pocos segundos
+      will: { kind: 'vis', obj: { t: 'estado', s: 'offline', n: nombre || 'Cámara' } },
       subs: { cam: onOrden },
       onConnect: function () { heartbeat(); },
       onStatus: function (n) { msgN = n; paint(); }
     });
   }
 
-  // ---------- Video (PeerJS, con identificador nuevo en cada arranque: no hay "lugares" que se ocupen) ----------
-  var peer = null, call = null, restartTimer = null, callTimer = null;
+  // ---------- Video (PeerJS) ----------
+  // Ahorro: la conexión de video solo existe mientras mirás. En espera no hay ninguna (antes mandaba una señal cada 5 s).
+  var peer = null, call = null, restartTimer = null, callTimer = null, idleSince = 0;
+  function ensurePeer(cb) {
+    if (peer && peer.open) { cb(true); return; }
+    if (!peer || peer.destroyed || peer.disconnected) startPeer();
+    var p = peer, done = false;
+    var t = setTimeout(function () { if (!done) { done = true; cb(false); } }, 15000);
+    p.on('open', function () { if (!done) { done = true; clearTimeout(t); cb(true); } });
+  }
+  function dropPeer() {
+    clearTimeout(restartTimer); restartTimer = null;
+    if (peer) { var old = peer; peer = null; try { old.destroy(); } catch (e) {} }
+    peerOk = false;
+  }
   function startPeer() {
     clearTimeout(restartTimer); restartTimer = null;
     if (peer) { var old = peer; peer = null; try { old.destroy(); } catch (e) {} }
@@ -364,13 +420,13 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     p.on('disconnected', function () {
       if (p !== peer) return;
       peerOk = false; paint();
-      setTimeout(function () { if (p === peer && !p.destroyed && p.disconnected) { try { p.reconnect(); } catch (e) { restartSoon(); } } }, 2000);
+      setTimeout(function () { if (p === peer && !p.destroyed && p.disconnected && state !== 'espera') { try { p.reconnect(); } catch (e) { restartSoon(); } } }, 2000);
     });
     p.on('error', function (err) {
       if (p !== peer) return;
       var t = err && err.type;
       if (t === 'peer-unavailable') { if (state !== 'espera') turnOff('Tu iPhone ya no está'); return; }
-      peerOk = false; paint(); restartSoon();
+      peerOk = false; paint(); if (state !== 'espera') restartSoon();
     });
   }
   function restartSoon() { if (!restartTimer) restartTimer = setTimeout(startPeer, 4000); }
@@ -381,7 +437,11 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     endCall();
     setState('encendiendo');
     var go = function () {
-      if (state !== 'encendiendo' || !peer || !peer.open) { if (!peer || !peer.open) setState('error', 'Sin conexión de video, reintentando'); return; }
+      if (state !== 'encendiendo') return;
+      ensurePeer(function (ok) {
+      if (state !== 'encendiendo') return;
+      if (!ok) { turnOff('Sin conexión de video, probá de nuevo'); return; }
+      pauseCam(false);
       applyMode(LIVE).then(function () {
         if (state !== 'encendiendo') return;
         var c = peer.call(viewer, warm);
@@ -398,6 +458,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
         c.on('error', function () { if (call === c) { call = null; turnOff('El video se cortó'); } });
         clearTimeout(callTimer);
         callTimer = setTimeout(function () { if (call === c && state === 'encendiendo') turnOff('El video no llegó a conectar'); }, 25000);
+      });
       });
     };
     if (warmAlive()) { go(); return; }
@@ -426,7 +487,8 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   }
   function turnOff(msg) {
     endCall();
-    applyMode(REST);
+    if (permOk) releaseWarm(); else { applyMode(REST); pauseCam(true); }
+    idleSince = Date.now();
     setState('espera', msg || '');
     if (msg) setTimeout(function () { if (state === 'espera' && note === msg) { note = ''; paint(); } }, 15000);
   }
@@ -438,36 +500,38 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   }
   window.addEventListener('scroll', checkHint);
   function goStandby() {
-    $('canalTxt').textContent = 'Canal ' + canal(code) + ' · ';
+    $('canalTxt').textContent = 'Canal ' + canal(code) + ' · ' + (nombre || 'Cámara') + ' · ';
+    checkPerm();
     document.body.className = 'standby';
     checkHint(); show('standby'); tick();
-    listen(); startPeer(); setState('espera');
+    listen(); setState('espera');
   }
 
-  setInterval(tick, 10000);
-  setInterval(function () { if (!$('standby').hidden && Date.now() - lastBeat > 10 * 60 * 1000) heartbeat(); }, 30000);
-  // Si tu iPhone deja de dar señales 30 s, la cámara vuelve a reposo sola.
-  setInterval(function () {
-    if ((state === 'en-vivo' || state === 'encendiendo' || state === 'permiso') && Date.now() - lastPing > 30000) turnOff();
-  }, 5000);
-  // Vigilante del video: reconecta si se cayó; cada 6 h sin uso se renueva (credenciales del relé frescas).
-  var peerBorn = Date.now();
-  setInterval(function () {
-    if ($('standby').hidden || !code) return;
-    if (!peer || peer.destroyed) startPeer();
-    else if (peer.disconnected) { try { peer.reconnect(); } catch (e) { restartSoon(); } }
-    else if (state === 'espera' && Date.now() - peerBorn > 6 * 3600 * 1000) { peerBorn = Date.now(); startPeer(); }
-  }, 20000);
+  // Un solo temporizador: en espera se despierta una vez por minuto (justo al cambiar la hora); mirando, cada 5 s.
+  function loop() {
+    var live = state === 'en-vivo' || state === 'encendiendo' || state === 'permiso';
+    if (!$('standby').hidden) {
+      tick();
+      // Si tu iPhone deja de dar señales 30 s, la cámara vuelve a reposo sola.
+      if (live && Date.now() - lastPing > 30000) turnOff();
+      if (Date.now() - lastBeat > 10 * 60 * 1000) heartbeat();
+      // Un minuto después de dejar de mirar, se cierra la conexión de video.
+      if (!live && peer && idleSince && Date.now() - idleSince > 60000) { dropPeer(); idleSince = 0; paint(); }
+    }
+    var d = new Date();
+    setTimeout(loop, live ? 5000 : (60 - d.getSeconds()) * 1000 - d.getMilliseconds() + 50);
+  }
+  loop();
   document.addEventListener('visibilitychange', function () {
     if (document.hidden || $('standby').hidden) return;
     if (!bus || bus.connected() === 0) listen();
-    if (!peer || peer.disconnected || peer.destroyed) startPeer();
-    heartbeat();
+    tick(); heartbeat();
   });
 
   // ---------- Arranque ----------
   if (typeof Peer === 'undefined' || typeof mqtt === 'undefined') { show('setup'); $('err').textContent = 'No cargó la conexión. Revisá internet y recargá.'; return; }
-  if (code) show('tap'); else show('setup');
+  $('code').value = code; $('nombre').value = nombre;
+  if (code && nombre) show('tap'); else show('setup');
 })();
 </script>
 </body>
