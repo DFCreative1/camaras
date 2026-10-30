@@ -54,6 +54,12 @@ header{display:flex;align-items:center;justify-content:space-between;gap:12px;pa
 /* Monitor */
 .monitor{position:relative;width:100%;max-width:100%;aspect-ratio:16/9;max-height:72vh;border-radius:18px;overflow:hidden;background:#050607;border:1px solid var(--line)}
 .monitor video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+/* Zoom: una capa que se agranda y se mueve con los dedos; el video (y su giro) va adentro */
+.zoom{position:absolute;inset:0;transform-origin:0 0;will-change:transform}
+body.live .monitor{touch-action:none;-webkit-user-select:none;user-select:none}
+.zchip{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);z-index:2;padding:6px 12px;border-radius:999px;border:0;
+  background:rgba(0,0,0,.6);color:#fff;font:inherit;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums;cursor:pointer}
+body.max .zchip{bottom:max(14px, env(safe-area-inset-bottom))}
 .idle{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center}
 .idle p{margin:0;max-width:30ch;font-size:15px;line-height:1.45;color:var(--muted)}
 .idle strong{display:block;color:var(--text);font-size:17px;font-weight:600;margin-bottom:4px}
@@ -65,7 +71,15 @@ header{display:flex;align-items:center;justify-content:space-between;gap:12px;pa
   font-variant-numeric:tabular-nums;color:#fff;pointer-events:none}
 .hud .rec{display:inline-flex;align-items:center;gap:7px}
 .hud .rec i{width:8px;height:8px;border-radius:50%;background:var(--live);animation:pulse 1.6s ease-in-out infinite}
-.full{position:absolute;right:12px;bottom:12px;width:38px;height:38px;border-radius:10px;border:0;background:rgba(0,0,0,.5);color:#fff;
+.monitor video.rot{inset:auto;left:50%;top:50%}
+.girar{position:absolute;left:12px;bottom:12px;width:38px;height:38px;border-radius:10px;border:0;background:rgba(0,0,0,.5);color:#fff;
+  display:grid;place-items:center;cursor:pointer;z-index:2}
+/* Pantalla completa propia (sin el reproductor de iOS, que no respeta el giro y pausa el video al salir) */
+body.max .monitor{position:fixed;left:0;top:0;width:100%;height:100%;max-height:none;border-radius:0;border:0;z-index:5;background:#000}
+body.max .hud{padding-top:max(12px, env(safe-area-inset-top));padding-left:max(14px, env(safe-area-inset-left));padding-right:max(14px, env(safe-area-inset-right))}
+body.max .girar{bottom:max(12px, env(safe-area-inset-bottom));left:max(12px, env(safe-area-inset-left))}
+body.max .full{bottom:max(12px, env(safe-area-inset-bottom));right:max(12px, env(safe-area-inset-right))}
+.full{position:absolute;right:12px;bottom:12px;z-index:2;width:38px;height:38px;border-radius:10px;border:0;background:rgba(0,0,0,.5);color:#fff;
   display:grid;place-items:center;cursor:pointer}
 
 /* Controles */
@@ -91,9 +105,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 @media (orientation:landscape) and (max-height:540px){
   body.live .monitor{position:fixed;left:0;top:0;width:100%;height:100%;max-height:none;aspect-ratio:auto;border-radius:0;border:0;z-index:5;background:#000}
   body.live .hud{padding-left:max(14px, env(safe-area-inset-left));padding-right:max(14px, env(safe-area-inset-right))}
-  body.live .full{display:none}
-  body.live .monitor video{object-fit:cover}
-  body.live .monitor.entera video{object-fit:contain}
+  body.live:not(.max) .full{display:none}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
@@ -119,12 +131,16 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   <section id="view" hidden>
     <div style="display:flex;flex-direction:column;gap:16px">
       <div class="monitor" id="monitor" data-s="sin-red">
-        <video id="video" playsinline autoplay muted hidden></video>
+        <div class="zoom" id="zoom"><video id="video" playsinline autoplay muted hidden></video></div>
+        <button class="zchip" id="zchip" type="button" hidden>1,0× · tocar para volver</button>
         <div class="idle" id="idle">
           <svg class="pane" width="64" height="64" viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="6" fill="none" stroke="#9cc3e4" stroke-width="2"/><path d="M32 6v52M6 32h52" stroke="#9cc3e4" stroke-width="2"/><path d="M13 23l9-9M39 49l9-9" stroke="#9cc3e4" stroke-width="1.6" opacity=".55"/></svg>
           <p id="idleText"><strong>Conectando con la cámara</strong>Un momento.</p>
         </div>
         <div class="hud" id="hud" hidden><span class="rec"><i></i>EN VIVO <span id="elapsed">00:00</span></span><span id="now">--:--</span></div>
+        <button class="girar" id="girar" type="button" aria-label="Girar imagen" hidden>
+          <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M14.5 6.5A6 6 0 1 0 15 11" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 2.5v4.2h-4.2" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
         <button class="full" id="full" type="button" aria-label="Pantalla completa" hidden>
           <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 7V2h5M11 2h5v5M16 11v5h-5M7 16H2v-5" fill="none" stroke="#fff" stroke-width="1.8"/></svg>
         </button>
@@ -142,7 +158,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v11';
+  var VER = 'v11.2';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -323,9 +339,11 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     $('pill').setAttribute('data-s', live ? 'en-vivo' : st);
     $('pillText').textContent = live ? PILL['en-vivo'] : (PILL[st] || st);
     $('monitor').setAttribute('data-s', live ? 'en-vivo' : st);
-    $('video').hidden = !live; $('hud').hidden = !live; $('full').hidden = !live;
+    $('video').hidden = !live; $('hud').hidden = !live; $('full').hidden = !live; $('girar').hidden = !live;
+    if (!live) maxi = false;
     $('idle').hidden = live;
-    document.body.className = live ? 'live' : '';
+    var cls = live ? 'live' + (maxi ? ' max' : '') : '';
+    if (document.body.className !== cls) { document.body.className = cls; zReset(); setTimeout(applyRot, 50); }
     var t = IDLE[st] || IDLE['espera'];
     $('idleText').innerHTML = '';
     var s = document.createElement('strong');
@@ -384,9 +402,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
         var v = $('video'); v.srcObject = s;
         var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
         hasVideo = true; lastErr = ''; clearTimeout(noVideoTimer); render();
-        v.onloadedmetadata = v.onresize = function () {
-          if (v.videoWidth && v.videoHeight) $('monitor').style.aspectRatio = v.videoWidth + ' / ' + v.videoHeight;
-        };
+        v.onloadedmetadata = v.onresize = function () { applyRot(); };
         setTimeout(function () { measureRoute(c); }, 1500);
       });
       var end = function () { if (call === c) { call = null; hasVideo = false; route = ''; $('video').srcObject = null; render(); } };
@@ -441,11 +457,104 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   }
   ['webkitendfullscreen', 'pause'].forEach(function (ev) { $('video').addEventListener(ev, function () { setTimeout(resumeVideo, 150); setTimeout(resumeVideo, 800); }); });
   ['webkitfullscreenchange', 'fullscreenchange'].forEach(function (ev) { document.addEventListener(ev, function () { setTimeout(resumeVideo, 150); setTimeout(resumeVideo, 800); }); });
-  $('video').onclick = function () { $('monitor').classList.toggle('entera'); };
-  $('full').onclick = function () {
-    var v = $('video');
-    if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
-    else if (v.requestFullscreen) v.requestFullscreen().catch(function () {});
+  // ---------- Zoom con los dedos ----------
+  // Pellizcar: acerca en ese punto. Un dedo: recorre la imagen acercada. Doble toque: acerca ×2,5 ahí o vuelve.
+  var Z = { z: 1, x: 0, y: 0 }, ZMAX = 6;
+  function zApply() {
+    var mon = $('monitor'), W = mon.clientWidth, H = mon.clientHeight;
+    if (Z.z < 1.01) { Z.z = 1; Z.x = 0; Z.y = 0; }
+    Z.x = Math.min(0, Math.max(W - W * Z.z, Z.x));
+    Z.y = Math.min(0, Math.max(H - H * Z.z, Z.y));
+    $('zoom').style.transform = 'translate(' + Z.x + 'px,' + Z.y + 'px) scale(' + Z.z + ')';
+    var chip = $('zchip');
+    chip.hidden = Z.z === 1 || $('video').hidden;
+    chip.textContent = Z.z.toFixed(1).replace('.', ',') + '× · tocar para volver';
+  }
+  function zReset() { Z.z = 1; Z.x = 0; Z.y = 0; zApply(); }
+  function zAt(p, nz) { // acerca o aleja dejando quieto el punto p
+    var cx = (p.x - Z.x) / Z.z, cy = (p.y - Z.y) / Z.z;
+    Z.z = Math.max(1, Math.min(ZMAX, nz)); Z.x = p.x - cx * Z.z; Z.y = p.y - cy * Z.z; zApply();
+  }
+  (function () {
+    var mon = $('monitor'), g = null, lastTap = 0, lastTapP = null;
+    function local(t) { var r = mon.getBoundingClientRect(); return { x: t.clientX - r.left, y: t.clientY - r.top }; }
+    function onCtrl(e) { var t = e.target; return t && t.closest && t.closest('button'); }
+    mon.addEventListener('touchstart', function (e) {
+      if ($('video').hidden || onCtrl(e)) return;
+      e.preventDefault();
+      var ts = e.touches;
+      if (ts.length >= 2) {
+        var a = local(ts[0]), b = local(ts[1]);
+        g = { pinch: true, z0: Z.z, x0: Z.x, y0: Z.y, d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, m0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
+      } else {
+        var p = local(ts[0]);
+        g = { pinch: false, x0: Z.x, y0: Z.y, p0: p, moved: false };
+      }
+    }, { passive: false });
+    mon.addEventListener('touchmove', function (e) {
+      if (!g || $('video').hidden) return;
+      e.preventDefault();
+      var ts = e.touches;
+      if (g.pinch && ts.length >= 2) {
+        var a = local(ts[0]), b = local(ts[1]), m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        var d = Math.hypot(a.x - b.x, a.y - b.y);
+        var nz = Math.max(1, Math.min(ZMAX, g.z0 * d / g.d0));
+        var cx = (g.m0.x - g.x0) / g.z0, cy = (g.m0.y - g.y0) / g.z0;
+        Z.z = nz; Z.x = m.x - cx * nz; Z.y = m.y - cy * nz; zApply();
+      } else if (!g.pinch && ts.length === 1) {
+        var p = local(ts[0]);
+        if (Math.abs(p.x - g.p0.x) + Math.abs(p.y - g.p0.y) > 6) g.moved = true;
+        if (Z.z > 1) { Z.x = g.x0 + p.x - g.p0.x; Z.y = g.y0 + p.y - g.p0.y; zApply(); }
+      }
+    }, { passive: false });
+    mon.addEventListener('touchend', function (e) {
+      if (!g) return;
+      if (e.touches.length === 1 && g.pinch) { // de dos dedos a uno: seguir recorriendo con el que quedó
+        g = { pinch: false, x0: Z.x, y0: Z.y, p0: local(e.touches[0]), moved: true }; return;
+      }
+      if (e.touches.length) return;
+      if (!g.pinch && !g.moved) {
+        var now = Date.now(), p = g.p0;
+        if (now - lastTap < 320 && lastTapP && Math.abs(p.x - lastTapP.x) + Math.abs(p.y - lastTapP.y) < 40) {
+          if (Z.z > 1) zReset(); else zAt(p, 2.5);
+          lastTap = 0;
+        } else { lastTap = now; lastTapP = p; }
+      }
+      g = null;
+    });
+    // iOS: que el pellizco no agrande toda la página
+    ['gesturestart', 'gesturechange'].forEach(function (ev) { mon.addEventListener(ev, function (e) { e.preventDefault(); }); });
+    // En la computadora: rueda del mouse
+    mon.addEventListener('wheel', function (e) {
+      if ($('video').hidden) return;
+      e.preventDefault(); zAt(local(e), Z.z * (e.deltaY < 0 ? 1.15 : 1 / 1.15));
+    }, { passive: false });
+  })();
+  $('zchip').onclick = function (e) { e.stopPropagation(); zReset(); };
+  // Giro de la imagen: si el 5s manda el video de costado, cada toque gira 90°. Queda guardado en este teléfono.
+  var rot = 0;
+  try { rot = (parseInt(localStorage.getItem(KEY + '.giro'), 10) || 0) % 360; } catch (e) {}
+  function applyRot() {
+    var v = $('video'), mon = $('monitor'), vw = v.videoWidth, vh = v.videoHeight, side = rot % 180 !== 0;
+    if (vw && vh) mon.style.aspectRatio = side ? (vh + ' / ' + vw) : (vw + ' / ' + vh);
+    if (!rot) { v.classList.remove('rot'); v.style.width = v.style.height = v.style.transform = ''; return; }
+    var W = mon.clientWidth, H = mon.clientHeight;
+    v.classList.add('rot');
+    v.style.width = (side ? H : W) + 'px'; v.style.height = (side ? W : H) + 'px';
+    v.style.transform = 'translate(-50%,-50%) rotate(' + rot + 'deg)';
+  }
+  $('girar').onclick = function (e) {
+    e.stopPropagation();
+    rot = (rot + 90) % 360; zReset();
+    try { localStorage.setItem(KEY + '.giro', String(rot)); } catch (e2) {}
+    applyRot(); setTimeout(applyRot, 50);
+  };
+  window.addEventListener('resize', function () { setTimeout(function () { applyRot(); zApply(); }, 60); });
+  window.addEventListener('orientationchange', function () { setTimeout(applyRot, 300); });
+  var maxi = false;
+  $('full').onclick = function (e) {
+    e.stopPropagation();
+    maxi = !maxi; zReset(); render(); setTimeout(applyRot, 50);
   };
   $('change').onclick = function () {
     if (want) setWant(false);
