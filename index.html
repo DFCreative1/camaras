@@ -141,7 +141,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v10';
+  var VER = 'v10.1';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -257,6 +257,15 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 
   var code = '';
   try { code = localStorage.getItem(KEY) || ''; } catch (e) {}
+  // El ícono de inicio es como una app aparte y no ve lo guardado en Safari:
+  // por eso el código también viaja en la dirección (#c=...) y queda dentro del ícono al agregarlo.
+  (function () {
+    var m = /[#&]c=([^&]+)/.exec(location.hash);
+    if (m) { var c = decodeURIComponent(m[1]); if (c.length >= 6) { code = c; try { localStorage.setItem(KEY, code); } catch (e) {} } }
+  })();
+  function keepCodeInUrl() {
+    try { if (code && history.replaceState) history.replaceState(null, '', location.pathname + location.search + '#c=' + encodeURIComponent(code)); } catch (e) {}
+  }
   function mmss(ms) { var s = Math.max(0, Math.floor(ms / 1000)); return pad(Math.floor(s / 60)) + ':' + pad(s % 60); }
   function hhmm(t) { var d = new Date(t); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
 
@@ -409,6 +418,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     if (sub) { sub.close(); sub = null; }
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
     try { localStorage.removeItem(KEY); } catch (e) {}
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
     lastSeen = 0; cam = 'buscando';
     $('code').value = ''; $('view').hidden = true; $('setup').hidden = false;
   };
@@ -442,6 +452,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   }, 10000);
 
   function boot() {
+    keepCodeInUrl();
     $('setup').hidden = true; $('view').hidden = false;
     lastSeen = 0; cam = 'buscando'; render();
     listen(); startPeer();
