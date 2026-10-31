@@ -96,7 +96,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
-  <button id="reset" type="button"><span id="canalTxt"></span>v13 · Cambiar código</button>
+  <button id="reset" type="button"><span id="canalTxt"></span>v13.1 · Cambiar código</button>
 </div>
 
 <div id="spacer"></div>
@@ -107,7 +107,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v13';
+  var VER = 'v13.1';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -273,9 +273,15 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   var REST = { width: { ideal: 192 }, height: { ideal: 144 }, frameRate: { ideal: 1 } };
   var LIVE = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 20, max: 24 } };
   var warm = null;
+  // Registro: cuántas veces se pidió la cámara y por qué se cortó la última vez (se ve en las dos pantallas).
+  var gumN = 0, lastCut = '';
   function getCam() {
-    return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment', width: LIVE.width, height: LIVE.height, frameRate: LIVE.frameRate } });
+    gumN++;
+    var t0 = Date.now();
+    return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment', width: LIVE.width, height: LIVE.height, frameRate: LIVE.frameRate } })
+      .then(function (s) { s.__ms = Date.now() - t0; return s; });
   }
+  function hhmmNow() { var d = new Date(); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
   function stopStream(s) { if (s) s.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); }
   function warmAlive() { var t = warm && warm.getVideoTracks()[0]; return !!(t && t.readyState === 'live'); }
   function applyMode(c) {
@@ -288,22 +294,42 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   function pauseCam(on) { var t = warm && warm.getVideoTracks()[0]; if (t && AHORRO) t.enabled = !on; }
   // En iPhones nuevos (iOS 16 o más) el permiso puede quedar fijo para esta página ("Permitir").
   // Si está fijo, en espera la cámara se apaga del todo y se prende al pedir video, sin preguntar.
-  var permOk = false;
+  // Safari dice "concedido" también cuando el permiso es solo por esta vez. Por eso se COMPRUEBA:
+  // se apaga la cámara y se vuelve a pedir; si vuelve al instante sin cartel, el permiso es fijo.
+  var permOk = false, probing = false, coldOk = null;
+  try { var co = localStorage.getItem(KEY + '.fijo'); coldOk = co === null ? null : co === '1'; } catch (e) {}
+  function setCold(v) { coldOk = v; permOk = v; try { localStorage.setItem(KEY + '.fijo', v ? '1' : '0'); } catch (e) {} paint(); heartbeat(); }
   function checkPerm() {
     try {
-      if (!navigator.permissions || !navigator.permissions.query) return;
+      if (!navigator.permissions || !navigator.permissions.query) return; // iOS 12: siempre en reposo
       navigator.permissions.query({ name: 'camera' }).then(function (r) {
-        var upd = function () { permOk = r.state === 'granted'; if (permOk && state === 'espera') releaseWarm(); paint(); };
+        var upd = function () {
+          if (r.state !== 'granted') { permOk = false; paint(); return; }
+          if (coldOk === true) { permOk = true; if (state === 'espera') releaseWarm(); paint(); }
+          else if (coldOk === null) probe();
+        };
         r.onchange = upd; upd();
       }).catch(function () {});
     } catch (e) {}
+  }
+  function probe() {
+    if (probing || state !== 'espera') return;
+    probing = true; note = 'Comprobando si el permiso quedó fijo…'; paint();
+    releaseWarm();
+    setTimeout(function () {
+      getCam().then(function (s) {
+        probing = false; note = '';
+        if (s.__ms < 1500) { stopStream(s); setCold(true); }
+        else { keepWarm(s); setCold(false); } // hubo cartel: el permiso no es fijo, queda en reposo
+      }).catch(function (e) { probing = false; setCold(false); setState('permiso', camError(e)); });
+    }, 800);
   }
   function releaseWarm() { if (warm) { var w = warm; warm = null; stopStream(w); } }
   function keepWarm(s) {
     if (warm && warm !== s) stopStream(warm);
     warm = s;
     var t = s.getVideoTracks()[0];
-    if (t) t.onended = function () { if (warm === s) { warm = null; heartbeat(); } };
+    if (t) t.onended = function () { if (warm === s) { warm = null; lastCut = 'iOS cortó la cámara ' + hhmmNow(); paint(); heartbeat(); } };
     applyMode(REST); pauseCam(true);
   }
   function camError(e) {
@@ -340,7 +366,8 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     if (bus) { bus.clear('vis'); var b0 = bus; bus = null; setTimeout(function () { b0.close(); }, 800); }
     $('nombre').value = nombre;
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
-    try { localStorage.removeItem(KEY); } catch (e) {}
+    try { localStorage.removeItem(KEY); localStorage.removeItem(KEY + '.fijo'); } catch (e) {}
+    coldOk = null; permOk = false;
     $('code').value = ''; document.body.className = ''; window.scrollTo(0, 0);
     show('setup');
   };
@@ -361,8 +388,9 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     $('stateText').textContent = shown === 'sin-red' ? 'Conectando' : (LABELS[state] || state);
     var red = 'avisos ' + msgN + '/' + (bus ? bus.total() : 0) + (AHORRO ? ' · ahorro de cámara' : '') + (state !== 'espera' ? ' · video ' + (peerOk ? 'ok' : '…') : '');
     var lista = permOk ? 'Cámara apagada hasta que la pidas' : (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso');
-    var tip = (!permOk && navigator.permissions) ? ' · Para ahorrar: aA → Ajustes del sitio web → Cámara → Permitir' : '';
-    $('sub').textContent = note || (state === 'espera' && ok ? lista + ' · ' + red + tip : red);
+    var tip = (!permOk && navigator.permissions) ? ' · Para ahorrar: aA → Ajustes del sitio web → Cámara → Permitir, y tocá Cambiar código → Activar' : '';
+    var reg = 'permisos pedidos ' + gumN + (lastCut ? ' · ' + lastCut : '');
+    $('sub').textContent = note || (state === 'espera' && ok ? lista + ' · ' + red + tip + ' · ' + reg : red + ' · ' + reg);
   }
   function tick() { var d = new Date(); $('clock').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()); }
   // Estado "guardado" en el servidor: tu iPhone lo recibe apenas abre. Se manda en cada cambio y cada 10 min.
@@ -371,7 +399,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   function heartbeat() {
     if (!code || $('standby').hidden || !bus) return;
     lastBeat = Date.now();
-    bus.send('vis', { t: 'estado', n: nombre || 'Cámara', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive() || permOk, video: peerOk, msg: note, v: VER }, true);
+    bus.send('vis', { t: 'estado', n: nombre || 'Cámara', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive() || permOk, fijo: permOk, g: gumN, cut: lastCut, video: peerOk, msg: note, v: VER }, true);
   }
 
   // ---------- Órdenes desde tu iPhone ----------
@@ -465,6 +493,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     var waiting = setTimeout(function () { if (state === 'encendiendo') setState('permiso', 'Safari está pidiendo permiso'); }, 8000);
     getCam().then(function (s) {
       clearTimeout(waiting); keepWarm(s);
+      if (s.__ms > 2500 && coldOk) setCold(false); // apareció el cartel: el permiso no era fijo
       if (state === 'encendiendo' || state === 'permiso') { state = 'encendiendo'; go(); }
     }).catch(function (e) { clearTimeout(waiting); setState(e && e.name === 'NotAllowedError' ? 'permiso' : 'error', camError(e)); });
   }
@@ -523,7 +552,8 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   }
   loop();
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden || $('standby').hidden) return;
+    if (document.hidden) { if (warm) lastCut = 'Safari pasó a segundo plano ' + hhmmNow(); return; }
+    if ($('standby').hidden) return;
     if (!bus || bus.connected() === 0) listen();
     tick(); heartbeat();
   });

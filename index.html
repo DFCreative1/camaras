@@ -170,7 +170,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v13';
+  var VER = 'v13.1';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -432,6 +432,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     $('diag').textContent = VER + ' · canal ' + canal(code) + ' · avisos ' + msgN + '/' + (bus ? bus.total() : 0) +
       ' · video ' + (peer && peer.open ? 'listo' : 'preparando') +
       (lastSeen ? ' · ' + camName(sel) + ' ' + (cam === 'offline' ? 'desconectada' : 'vista ' + hhmm(lastOnline)) : '') +
+      (cams[sel] && cams[sel].g !== undefined ? ' · cámara ' + (cams[sel].fijo ? 'apagada en espera (permiso fijo)' : 'en reposo') + ', permisos pedidos ' + cams[sel].g + (cams[sel].cut ? ' (' + cams[sel].cut + ')' : '') : '') +
       (route ? ' · ' + route : '') + (lastErr ? ' · ' + lastErr : '');
   }
 
@@ -444,6 +445,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       if (m.t !== 'estado') return;
       var c = cams[id] || (cams[id] = { n: '', online: 0 });
       c.n = m.n || c.n || id; c.s = m.s; c.msg = m.msg || ''; c.lista = m.lista !== false; c.seen = Date.now();
+      if (m.g !== undefined) { c.g = m.g; c.cut = m.cut || ''; c.fijo = !!m.fijo; }
       if (m.s !== 'offline') c.online = Math.min(m.at || Date.now(), Date.now());
       c.live = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0;
     }
