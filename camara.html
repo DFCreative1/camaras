@@ -96,7 +96,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
-  <button id="reset" type="button"><span id="canalTxt"></span>v13.2 · Cambiar código</button>
+  <button id="reset" type="button"><span id="canalTxt"></span>v13.3 · Cambiar código</button>
 </div>
 
 <div id="spacer"></div>
@@ -107,7 +107,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v13.2';
+  var VER = 'v13.3';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -281,6 +281,10 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment', width: LIVE.width, height: LIVE.height, frameRate: LIVE.frameRate } })
       .then(function (s) { s.__ms = Date.now() - t0; return s; });
   }
+  function liveCfg() {
+    if (state !== 'en-vivo' || !warmAlive()) return '';
+    try { var st = warm.getVideoTracks()[0].getSettings(); return (st.width || '?') + '×' + (st.height || '?') + ' a ' + Math.round(st.frameRate || 0) + ' cuadros/s'; } catch (e) { return ''; }
+  }
   function hhmmNow() { var d = new Date(); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
   function stopStream(s) { if (s) s.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); }
   function warmAlive() { var t = warm && warm.getVideoTracks()[0]; return !!(t && t.readyState === 'live'); }
@@ -333,6 +337,10 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     if (warm && warm !== s) stopStream(warm);
     warm = s;
     var t = s.getVideoTracks()[0];
+    if (t) {
+      t.onmute = function () { if (warm === s) { lastCut = 'iOS pausó la cámara ' + hhmmNow(); paint(); heartbeat(); } };
+      t.onunmute = function () { if (warm === s) { paint(); } };
+    }
     if (t) t.onended = function () { if (warm === s) { warm = null; lastCut = 'iOS cortó la cámara ' + hhmmNow(); paint(); heartbeat(); } };
     applyMode(REST); pauseCam(true);
   }
@@ -403,7 +411,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   function heartbeat() {
     if (!code || $('standby').hidden || !bus) return;
     lastBeat = Date.now();
-    bus.send('vis', { t: 'estado', n: nombre || 'Cámara', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive() || permOk, fijo: permOk, g: gumN, cut: lastCut, video: peerOk, msg: note, v: VER }, true);
+    bus.send('vis', { t: 'estado', n: nombre || 'Cámara', s: state, ms: liveSince ? Date.now() - liveSince : 0, lista: warmAlive() || permOk, fijo: permOk, cfg: liveCfg(), g: gumN, cut: lastCut, video: peerOk, msg: note, v: VER }, true);
   }
 
   // ---------- Órdenes desde tu iPhone ----------
@@ -412,6 +420,8 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     if (!ordenValida(code, m, CAM)) return;
     if (m.t === 'hola') { heartbeat(); return; }
     if (m.t === 'on') { lastPing = Date.now(); viewer = m.v || viewer; turnOn(); return; }
+    // Tu iPhone avisa que la imagen se detuvo: rehacer la transmisión aunque crea que sigue andando.
+    if (m.t === 're') { lastPing = Date.now(); viewer = m.v || viewer; endCall(); turnOn(); return; }
     if (m.t === 'ping') { lastPing = Date.now(); if (m.v && state === 'espera') { viewer = m.v; turnOn(); } return; }
     if (m.t === 'off') { if (!m.v || m.v === viewer) turnOff(); }
   }
@@ -484,6 +494,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
           if (call !== c) return;
           if (s === 'connected' || s === 'completed') { clearTimeout(callTimer); setState('en-vivo'); capBitrate(c, 1500000); }
           if (s === 'failed' || s === 'closed') turnOff(s === 'failed' ? 'No hubo camino para el video' : '');
+          if (s === 'disconnected') setTimeout(function () { if (call === c && pc.iceConnectionState === 'disconnected') turnOff('Se cortó la conexión de video'); }, 6000);
         };
         if (pc) pc.addEventListener('iceconnectionstatechange', check);
         c.on('close', function () { if (call === c) { call = null; turnOff(); } });

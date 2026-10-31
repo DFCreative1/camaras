@@ -170,7 +170,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v13.2';
+  var VER = 'v13.3';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -434,6 +434,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       ' · video ' + (peer && peer.open ? 'listo' : 'preparando') +
       (lastSeen ? ' · ' + camName(sel) + ' ' + (cam === 'offline' ? 'desconectada' : 'vista ' + hhmm(lastOnline)) : '') +
       (cams[sel] && cams[sel].g !== undefined ? ' · cámara ' + (cams[sel].fijo ? 'apagada en espera (permiso fijo)' : 'en reposo') + ', permisos pedidos ' + cams[sel].g + (cams[sel].cut ? ' (' + cams[sel].cut + ')' : '') : '') +
+      (hasVideo && fr.fps ? ' · imagen ' + fr.fps + ' cuadros/s' : '') + (cams[sel] && cams[sel].cfg && hasVideo ? ' (cámara ' + cams[sel].cfg + ')' : '') +
+      (fr.cortes ? ' · cortes de imagen ' + fr.cortes : '') +
       (route ? ' · ' + route : '') + (lastErr ? ' · ' + lastErr : '');
   }
 
@@ -447,6 +449,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       var c = cams[id] || (cams[id] = { n: '', online: 0 });
       c.n = m.n || c.n || id; c.s = m.s; c.msg = m.msg || ''; c.lista = m.lista !== false; c.seen = Date.now();
       if (m.g !== undefined) { c.g = m.g; c.cut = m.cut || ''; c.fijo = !!m.fijo; }
+      c.cfg = m.cfg || '';
       if (m.s !== 'offline') c.online = Math.min(m.at || Date.now(), Date.now());
       c.live = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0;
     }
@@ -485,7 +488,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       call = c;
       c.answer();
       c.on('stream', function (s) {
-        var v = $('video'); v.srcObject = s;
+        var v = $('video'); v.srcObject = s; fr.n = -1; fr.at = Date.now();
         var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
         hasVideo = true; lastErr = ''; clearTimeout(noVideoTimer); render();
         v.onloadedmetadata = v.onresize = function () { applyRot(); };
@@ -510,9 +513,48 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       var l = byId[pair.localCandidateId], rm = byId[pair.remoteCandidateId];
       var t = [l && l.candidateType, rm && rm.candidateType];
       route = t.indexOf('relay') >= 0 ? 'por relé' : (t[0] === 'host' && t[1] === 'host' ? 'directo por wifi' : 'directo por internet');
-      route += ' en ' + ((Date.now() - wantSince) / 1000).toFixed(1) + ' s';
+      route += ' en ' + ((Date.now() - (fr.reAt > wantSince ? fr.reAt : wantSince)) / 1000).toFixed(1) + ' s';
       render();
     }).catch(function () {});
+  }
+
+  // ---------- Vigilancia de la imagen ----------
+  // Si dejan de llegar cuadros 4 s (iOS pausó la cámara, se cortó la conexión, etc.), reconecta solo.
+  // Antes la última imagen quedaba congelada con "EN VIVO".
+  var fr = { n: -1, at: 0, fps: 0, cortes: 0, busy: false, reAt: 0 };
+  function frameCount(cb) {
+    var pc = call && call.peerConnection;
+    if (pc && pc.getStats) {
+      pc.getStats().then(function (st) {
+        var n = -1;
+        st.forEach(function (r) { if (r.type === 'inbound-rtp' && (r.kind === 'video' || r.mediaType === 'video') && r.framesDecoded !== undefined) n = r.framesDecoded; });
+        if (n < 0) { var v = $('video'); if (v.getVideoPlaybackQuality) n = v.getVideoPlaybackQuality().totalVideoFrames; }
+        cb(n);
+      }).catch(function () { cb(-1); });
+    } else cb(-1);
+  }
+  function watchFrames() {
+    if (!want || !hasVideo || document.hidden || fr.busy) return;
+    fr.busy = true;
+    frameCount(function (n) {
+      fr.busy = false;
+      if (n < 0 || !want || !hasVideo) return;
+      var now = Date.now();
+      if (n !== fr.n) {
+        if (fr.n >= 0 && now > fr.at) fr.fps = Math.round((n - fr.n) * 1000 / (now - fr.at));
+        fr.n = n; fr.at = now;
+      } else if (now - fr.at > 4000) reconnectFrozen();
+    });
+  }
+  function reconnectFrozen() {
+    fr.cortes++; fr.fps = 0; fr.n = -1; fr.reAt = Date.now();
+    lastErr = 'la imagen se detuvo ' + hhmm(Date.now()) + ': reconectando';
+    if (call) { var c = call; call = null; try { c.close(); } catch (e) {} }
+    hasVideo = false; route = ''; $('video').srcObject = null;
+    if (peer && peer.open) publish(code, 'cam', orden(code, 're', peer.id, sel));
+    clearTimeout(noVideoTimer);
+    noVideoTimer = setTimeout(function () { if (want && !hasVideo) { lastErr = 'la imagen no vuelve: reintentando'; render(); sendOn(); } }, 12000);
+    render();
   }
 
   // ---------- Encender / apagar ----------
@@ -666,6 +708,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     var d = new Date(); $('now').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes());
     if (hasVideo && liveSince) $('elapsed').textContent = mmss(Date.now() - liveSince);
     else if (hasVideo) $('elapsed').textContent = mmss(Date.now() - wantSince);
+    watchFrames();
     render();
   }, 1000);
   // Al salir de la pantalla, apaga la cámara para cuidar la batería del 5s. Al volver, reconecta al instante.
