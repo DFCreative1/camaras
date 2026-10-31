@@ -170,7 +170,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v13.1';
+  var VER = 'v13.2';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -343,7 +343,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   // cam: lo que informa el 5s en su último aviso. Si el aviso es viejo, se muestra "sin señal".
   var cam = 'buscando', camMsg = '', camLista = true, lastSeen = 0, lastOnline = 0, liveSince = 0, msgN = 0, bootAt = Date.now();
   // Todas las cámaras de este código: id → { n: nombre, s: estado, msg, lista, seen, online, ms }
-  var cams = {}, sel = '';
+  var cams = {}, sel = '', selByUser = false;
   try { sel = localStorage.getItem(KEY + '.sel') || ''; } catch (e) {}
   function camName(id) { return (cams[id] && cams[id].n) || 'la cámara'; }
   function camEff(c) {
@@ -375,6 +375,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
     });
   }
   function selectCam(id) {
+    selByUser = true;
     if (id === sel) return;
     var wasOn = want;
     if (want) setWant(false);
@@ -449,6 +450,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       if (m.s !== 'offline') c.online = Math.min(m.at || Date.now(), Date.now());
       c.live = m.s === 'en-vivo' ? Date.now() - (m.ms || 0) : 0;
     }
+    // Si la elegida la puso el visor solo y está desconectada, pasa a una conectada.
+    if (sel && cams[sel] && !selByUser && !want && camEff(cams[sel]) === 'sin-senal') sel = '';
     if (!sel || !cams[sel]) {
       var ids = visibleCams(), on = ids.filter(function (k) { return camEff(cams[k]) !== 'sin-senal'; });
       sel = on[0] || ids[0] || '';

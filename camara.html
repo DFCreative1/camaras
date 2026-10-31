@@ -96,7 +96,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
-  <button id="reset" type="button"><span id="canalTxt"></span>v13.1 · Cambiar código</button>
+  <button id="reset" type="button"><span id="canalTxt"></span>v13.2 · Cambiar código</button>
 </div>
 
 <div id="spacer"></div>
@@ -107,7 +107,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v13.1';
+  var VER = 'v13.2';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -299,14 +299,18 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   var permOk = false, probing = false, coldOk = null;
   try { var co = localStorage.getItem(KEY + '.fijo'); coldOk = co === null ? null : co === '1'; } catch (e) {}
   function setCold(v) { coldOk = v; permOk = v; try { localStorage.setItem(KEY + '.fijo', v ? '1' : '0'); } catch (e) {} paint(); heartbeat(); }
+  // v13.2: por defecto la cámara queda SIEMPRE en reposo (probado en el 5s y en el XR: no vuelve a preguntar).
+  // Apagarla del todo en espera es opcional: camara.html?apagar=1, con Cámara → Permitir en los ajustes del sitio.
+  var APAGAR = param('apagar') === '1';
   function checkPerm() {
+    if (!APAGAR) { permOk = false; paint(); return; }
     try {
       if (!navigator.permissions || !navigator.permissions.query) return; // iOS 12: siempre en reposo
       navigator.permissions.query({ name: 'camera' }).then(function (r) {
         var upd = function () {
           if (r.state !== 'granted') { permOk = false; paint(); return; }
-          if (coldOk === true) { permOk = true; if (state === 'espera') releaseWarm(); paint(); }
-          else if (coldOk === null) probe();
+          // Con ?apagar=1 se confía en el ajuste "Permitir"; si igual aparece el cartel, vuelve sola al reposo.
+          if (coldOk !== false) { permOk = true; if (state === 'espera') releaseWarm(); paint(); }
         };
         r.onchange = upd; upd();
       }).catch(function () {});
@@ -366,7 +370,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     if (bus) { bus.clear('vis'); var b0 = bus; bus = null; setTimeout(function () { b0.close(); }, 800); }
     $('nombre').value = nombre;
     if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
-    try { localStorage.removeItem(KEY); localStorage.removeItem(KEY + '.fijo'); } catch (e) {}
+    try { localStorage.removeItem(KEY); localStorage.removeItem(KEY + '.fijo'); localStorage.removeItem(KEY + '.activa'); } catch (e) {}
     coldOk = null; permOk = false;
     $('code').value = ''; document.body.className = ''; window.scrollTo(0, 0);
     show('setup');
@@ -388,7 +392,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
     $('stateText').textContent = shown === 'sin-red' ? 'Conectando' : (LABELS[state] || state);
     var red = 'avisos ' + msgN + '/' + (bus ? bus.total() : 0) + (AHORRO ? ' · ahorro de cámara' : '') + (state !== 'espera' ? ' · video ' + (peerOk ? 'ok' : '…') : '');
     var lista = permOk ? 'Cámara apagada hasta que la pidas' : (warmAlive() ? 'Cámara lista' : 'Al encenderla va a pedir permiso');
-    var tip = (!permOk && navigator.permissions) ? ' · Para ahorrar: aA → Ajustes del sitio web → Cámara → Permitir, y tocá Cambiar código → Activar' : '';
+    var tip = '';
     var reg = 'permisos pedidos ' + gumN + (lastCut ? ' · ' + lastCut : '');
     $('sub').textContent = note || (state === 'espera' && ok ? lista + ' · ' + red + tip + ' · ' + reg : red + ' · ' + reg);
   }
@@ -529,6 +533,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   }
   window.addEventListener('scroll', checkHint);
   function goStandby() {
+    try { localStorage.setItem(KEY + '.activa', '1'); } catch (e) {}
     $('canalTxt').textContent = 'Canal ' + canal(code) + ' · ' + (nombre || 'Cámara') + ' · ';
     checkPerm();
     document.body.className = 'standby';
@@ -561,7 +566,21 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   // ---------- Arranque ----------
   if (typeof Peer === 'undefined' || typeof mqtt === 'undefined') { show('setup'); $('err').textContent = 'No cargó la conexión. Revisá internet y recargá.'; return; }
   $('code').value = code; $('nombre').value = nombre;
-  if (code && nombre) show('tap'); else show('setup');
+  // Si Safari recargó la página (por memoria o porque estuvo mucho tiempo abierta), queda anotado
+  // y la cámara intenta reactivarse sola. Con permiso fijo no hace falta tocar nada; si Safari
+  // muestra el cartel, alcanza con tocar Permitir.
+  var activa = false;
+  try { activa = localStorage.getItem(KEY + '.activa') === '1'; } catch (e) {}
+  if (code && nombre && activa) {
+    lastCut = 'la página se volvió a cargar ' + hhmmNow();
+    $('tapErr').textContent = 'Reactivando sola… si aparece el cartel, tocá Permitir.';
+    show('tap');
+    getCam().then(function (s) {
+      keepWarm(s);
+      if (s.__ms > 2500 && coldOk) coldOk = null; // hubo cartel: volver a comprobar el permiso
+      goStandby();
+    }).catch(function (e) { $('tapErr').textContent = camError(e) + ' Tocá Activar.'; });
+  } else if (code && nombre) show('tap'); else show('setup');
 })();
 </script>
 </body>
