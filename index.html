@@ -170,7 +170,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v13.3';
+  var VER = 'v13.5';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -434,7 +434,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       ' · video ' + (peer && peer.open ? 'listo' : 'preparando') +
       (lastSeen ? ' · ' + camName(sel) + ' ' + (cam === 'offline' ? 'desconectada' : 'vista ' + hhmm(lastOnline)) : '') +
       (cams[sel] && cams[sel].g !== undefined ? ' · cámara ' + (cams[sel].fijo ? 'apagada en espera (permiso fijo)' : 'en reposo') + ', permisos pedidos ' + cams[sel].g + (cams[sel].cut ? ' (' + cams[sel].cut + ')' : '') : '') +
-      (hasVideo && fr.fps ? ' · imagen ' + fr.fps + ' cuadros/s' : '') + (cams[sel] && cams[sel].cfg && hasVideo ? ' (cámara ' + cams[sel].cfg + ')' : '') +
+      (hasVideo ? ' · imagen ' + (fr.src ? fr.fps + ' cuadros/s, ' : '') + fr.kbps + ' kbps' : '') + (cams[sel] && cams[sel].cfg && hasVideo ? ' (cámara ' + cams[sel].cfg + ')' : '') +
       (fr.cortes ? ' · cortes de imagen ' + fr.cortes : '') +
       (route ? ' · ' + route : '') + (lastErr ? ' · ' + lastErr : '');
   }
@@ -488,7 +488,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
       call = c;
       c.answer();
       c.on('stream', function (s) {
-        var v = $('video'); v.srcObject = s; fr.n = -1; fr.at = Date.now();
+        var v = $('video'); v.srcObject = s; fr.n = -1; fr.bytes = -1; fr.lastProg = 0; fr.at = Date.now(); fr.rv = 0; fr.src = ''; startFrameCounter(v);
         var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
         hasVideo = true; lastErr = ''; clearTimeout(noVideoTimer); render();
         v.onloadedmetadata = v.onresize = function () { applyRot(); };
@@ -519,35 +519,53 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--glass);outline-
   }
 
   // ---------- Vigilancia de la imagen ----------
-  // Si dejan de llegar cuadros 4 s (iOS pausó la cámara, se cortó la conexión, etc.), reconecta solo.
-  // Antes la última imagen quedaba congelada con "EN VIVO".
-  var fr = { n: -1, at: 0, fps: 0, cortes: 0, busy: false, reAt: 0 };
-  function frameCount(cb) {
+  // v13.4: solo reconecta si de verdad no llega NADA (ni cuadros ni datos) durante 8 s, y como mucho una vez cada 20 s.
+  // Si llegan datos pero la imagen está lenta, espera: la conexión se recupera sola y reconectar la empeora.
+  var fr = { n: -1, at: 0, fps: 0, cortes: 0, busy: false, reAt: 0, rv: 0, bytes: -1, kbps: 0, lastProg: 0, lastRe: 0, chain: 0, src: '' };
+  function startFrameCounter(v) {
+    if (!v.requestVideoFrameCallback) return;
+    var id = ++fr.chain; // v13.5: un contador nuevo deja sin efecto al anterior (antes podían sumar los dos)
+    var cb = function () { if (id !== fr.chain) return; fr.rv++; if (v.srcObject) v.requestVideoFrameCallback(cb); };
+    v.requestVideoFrameCallback(cb);
+  }
+  function readStats(cb) {
     var pc = call && call.peerConnection;
-    if (pc && pc.getStats) {
-      pc.getStats().then(function (st) {
-        var n = -1;
-        st.forEach(function (r) { if (r.type === 'inbound-rtp' && (r.kind === 'video' || r.mediaType === 'video') && r.framesDecoded !== undefined) n = r.framesDecoded; });
-        if (n < 0) { var v = $('video'); if (v.getVideoPlaybackQuality) n = v.getVideoPlaybackQuality().totalVideoFrames; }
-        cb(n);
-      }).catch(function () { cb(-1); });
-    } else cb(-1);
+    if (!pc || !pc.getStats) { cb(-1, -1); return; }
+    pc.getStats().then(function (st) {
+      var n = -1, b = -1;
+      st.forEach(function (r) {
+        if (r.type === 'inbound-rtp' && (r.kind === 'video' || r.mediaType === 'video')) {
+          if (r.framesDecoded !== undefined) n = r.framesDecoded;
+          if (r.bytesReceived !== undefined) b = r.bytesReceived;
+        }
+      });
+      cb(n, b);
+    }).catch(function () { cb(-1, -1); });
   }
   function watchFrames() {
     if (!want || !hasVideo || document.hidden || fr.busy) return;
     fr.busy = true;
-    frameCount(function (n) {
+    readStats(function (n, b) {
       fr.busy = false;
-      if (n < 0 || !want || !hasVideo) return;
-      var now = Date.now();
-      if (n !== fr.n) {
-        if (fr.n >= 0 && now > fr.at) fr.fps = Math.round((n - fr.n) * 1000 / (now - fr.at));
-        fr.n = n; fr.at = now;
-      } else if (now - fr.at > 4000) reconnectFrozen();
+      if (!want || !hasVideo) return;
+      var now = Date.now(), dt = fr.at ? (now - fr.at) / 1000 : 0;
+      // cuadros: el contador de la pantalla (más confiable en Safari) o, si no hay, el de la conexión
+      // v13.5: se usa el contador de pantalla solo si de verdad cuenta; si no, el de la conexión; si ninguno, no se muestra.
+      var src = ($('video').requestVideoFrameCallback && fr.rv > 0) ? 'rv' : (n >= 0 ? 'st' : '');
+      var frames = src === 'rv' ? fr.rv : (src === 'st' ? n : -1);
+      if (src !== fr.src) { fr.src = src; fr.n = -1; fr.fps = 0; }
+      var prog = false;
+      if (frames >= 0 && fr.n >= 0 && frames > fr.n) { prog = true; if (dt > 0) fr.fps = Math.round((frames - fr.n) / dt); }
+      if (b >= 0 && fr.bytes >= 0 && b > fr.bytes) { prog = true; if (dt > 0) fr.kbps = Math.round((b - fr.bytes) * 8 / 1000 / dt); }
+      if (frames >= 0 && fr.n >= 0 && frames === fr.n) fr.fps = 0;
+      if (b >= 0 && fr.bytes >= 0 && b === fr.bytes) fr.kbps = 0;
+      fr.n = frames; fr.bytes = b; fr.at = now;
+      if (prog || !fr.lastProg) fr.lastProg = now;
+      if (now - fr.lastProg > 8000 && now - fr.lastRe > 20000) reconnectFrozen();
     });
   }
   function reconnectFrozen() {
-    fr.cortes++; fr.fps = 0; fr.n = -1; fr.reAt = Date.now();
+    fr.cortes++; fr.fps = 0; fr.kbps = 0; fr.n = -1; fr.bytes = -1; fr.lastProg = 0; fr.src = ''; fr.chain++; fr.reAt = fr.lastRe = Date.now();
     lastErr = 'la imagen se detuvo ' + hhmm(Date.now()) + ': reconectando';
     if (call) { var c = call; call = null; try { c.close(); } catch (e) {} }
     hasVideo = false; route = ''; $('video').srcObject = null;

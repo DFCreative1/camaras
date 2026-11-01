@@ -96,7 +96,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
   <div class="clock" id="clock">--:--</div>
   <div class="state" id="state" data-s="sin-red"><i></i><span id="stateText">Conectando</span></div>
   <div class="sub" id="sub"></div>
-  <button id="reset" type="button"><span id="canalTxt"></span>v13.3 · Cambiar código</button>
+  <button id="reset" type="button"><span id="canalTxt"></span>v13.4 · Cambiar código</button>
 </div>
 
 <div id="spacer"></div>
@@ -107,7 +107,7 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
 (function () {
   'use strict';
   // ---------- Compartido entre las dos páginas (ES2017, corre en Safari 12) ----------
-  var VER = 'v13.3';
+  var VER = 'v13.4';
   var KEY = 'camaraVentana.codigo';
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -494,7 +494,8 @@ body.standby #spacer{display:block;height:calc(100vh + 240px)}
           if (call !== c) return;
           if (s === 'connected' || s === 'completed') { clearTimeout(callTimer); setState('en-vivo'); capBitrate(c, 1500000); }
           if (s === 'failed' || s === 'closed') turnOff(s === 'failed' ? 'No hubo camino para el video' : '');
-          if (s === 'disconnected') setTimeout(function () { if (call === c && pc.iceConnectionState === 'disconnected') turnOff('Se cortó la conexión de video'); }, 6000);
+          // En wifi la conexión queda "desconectada" unos segundos y vuelve sola: solo cortar si sigue así 20 s.
+          if (s === 'disconnected') setTimeout(function () { if (call === c && pc.iceConnectionState === 'disconnected') turnOff('Se cortó la conexión de video'); }, 20000);
         };
         if (pc) pc.addEventListener('iceconnectionstatechange', check);
         c.on('close', function () { if (call === c) { call = null; turnOff(); } });
